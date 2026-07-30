@@ -2,3 +2,5 @@ hdbcli
 requests
 python-dotenv
 hana-ml
+pyarrow
+rapidfuzz

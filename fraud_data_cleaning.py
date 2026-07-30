@@ -27,6 +27,7 @@ SCHEMA_DUMP_FILE = os.path.join(SCRIPT_DIR, "databasetables.txt")
 REPORT_FILE = os.path.join(SCRIPT_DIR, "data_quality_report.txt")
 
 SOURCE_SCHEMA = os.getenv("HANA_SCHEMA", "TEAM_03")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "cleaned_data")
 
 NATURAL_KEYS = {
     "TRANSACTIONS": ["TRANSACTION_UUID"],
@@ -446,6 +447,16 @@ def check_active_lists(cc, report):
                    total - active_count, total)
 
 
+def save_cleaned_locally(cleaned: dict, out_dir=OUTPUT_DIR):
+    """Collect each cleaned view to pandas and write CSV + Parquet locally."""
+    os.makedirs(out_dir, exist_ok=True)
+    for name, df in cleaned.items():
+        pdf = df.collect()
+        pdf.to_csv(os.path.join(out_dir, f"{name}.csv"), index=False)
+        pdf.to_parquet(os.path.join(out_dir, f"{name}.parquet"), index=False)
+        print(f"  wrote {name}: {len(pdf):,} rows -> {name}.csv, {name}.parquet")
+
+
 def build_cleaned_dataframes(cc, spec) -> dict:
     """Views (never materialized) handed to downstream feature engineering."""
     tables = spec["table_coverage"]["detection_tables"]
@@ -488,6 +499,10 @@ def main():
     report.dump()
 
     cleaned = build_cleaned_dataframes(cc, spec)
+
+    report.section(f"LOCAL EXPORT (cleaned views collected to pandas, written to {OUTPUT_DIR})")
+    save_cleaned_locally(cleaned)
+
     return cc, cleaned
 
 

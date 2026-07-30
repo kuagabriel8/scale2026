@@ -1,0 +1,57 @@
+
+========================================================================================
+SightLine Fraud Feature Report - as-of date: 2026-06-30 23:56:56
+========================================================================================
+
+========================================================================================
+COMPANY-LEVEL TYPOLOGY FEATURES
+========================================================================================
+  T05: substance test (low staff/high revenue + country mismatch)                 0  ( 0.00% of 5,000)
+  T05: recently incorporated (<= 24 months before as-of date)                     0  ( 0.00% of 5,000)
+  T05: full shell-company flag (substance AND recent incorporation)               0  ( 0.00% of 5,000)
+  NOTE: no company in this environment was incorporated within the recent-incorporation window - INCORPORATION_DATE tops out well before the as-of date, so T05 currently reduces to the substance test alone until more recent incorporations appear
+  T06: companies linked to a shared owner (>= 3 companies)                        0  ( 0.00% of 5,000)
+  T07: data-error rows (SUM ownership% > 100, excluded from score)            1,717  (34.34% of 5,000)
+  T07: unexplained ownership (SUM ownership% < 100)                           3,282  (65.64% of 5,000)
+  T07: stale/missing beneficial-owner verification (>= 24 months)                 0  ( 0.00% of 5,000)
+  T08: owner is PEP resident in high-corruption jurisdiction (index > 60)          0  ( 0.00% of 5,000)
+  T08: company PEP-associated + high-corruption HQ jurisdiction                   0  ( 0.00% of 5,000)
+  T08: combined PEP/corruption flag                                               0  ( 0.00% of 5,000)
+  companies with any company-level typology flag                              3,282  (65.64% of 5,000)
+
+========================================================================================
+TRANSACTION-LEVEL TYPOLOGY FEATURES
+========================================================================================
+  T01: transactions in the 10,000-band (>= 90% of threshold, USD only)        1,941  ( 1.29% of 150,000)
+  T01: structuring flag (3+ band txns / 72h per originator)                       0  ( 0.00% of 150,000)
+  NOTE: 75,017 non-USD transactions are excluded from T01 - no reliable per-currency threshold is available from SCREENING_RULES in this environment
+  T02: baseline z-score undefined (null/zero STDDEV) - excluded             108,543  (72.36% of 150,000)
+  T02: velocity spike flag (z > 3.0)                                          7,934  ( 5.29% of 150,000)
+  T02: daily count exceeds 1.5x baseline max                                    972  ( 0.65% of 150,000)
+  T03: pass-through flag (outbound >= 85% of trailing 5-day inbound)         11,514  ( 7.68% of 150,000)
+  T04: 2-hop round-trip legs (<= 30d, <= 15% amount variance)                    44  ( 0.03% of 150,000)
+  NOTE: this is the cheap 2-hop test only, per T04's critical_note - a full n-hop recursive cycle search (A->B->C->A, max_hops=4) is not implemented here
+  T09: beneficiary name fuzzy-matches a sanctioned entity (>= 88%)           44,450  (29.63% of 150,000)
+  NOTE: matches ENTITY_NAME only - ALIASES is empty in this environment (see data_quality_report.txt / exploded_aliases_view in fraud_data_cleaning.py) and does not filter by active/valid-at-transaction-date window yet
+  NOTE: CAVEAT: a 29.6% hit rate at a 88% threshold is high for a real sanctions-evasion signal - rapidfuzz's WRatio scorer inflates scores for short/generic names via partial-ratio boosting. Verify against known true/false positives before trusting this at face value; consider a stricter scorer (e.g. token_sort_ratio) or a higher threshold for production
+  T10: BIC-implied country code not present in COUNTRIES reference table     14,992  ( 9.99% of 150,000)
+  NOTE: unmapped BIC country code(s): ['RO'] - BIC implies a country outside the 23-row COUNTRIES reference table used for corridor/jurisdiction scoring
+  T10: jurisdiction divergence (destination/beneficiary vs. BIC-implied country)    125,559  (83.71% of 150,000)
+  NOTE: CAVEAT: DESTINATION_COUNTRY_ID == BENEFICIARY_COUNTRY_ID for every row in this environment, so the divergence flag above is driven entirely by BIC-implied country vs. those two (always-equal) fields. Only 6 distinct BIC country codes appear across 150,000 transactions - this produces a high, mechanically-driven hit rate here, not necessarily a discriminating real-world signal. Validate against production BIC diversity before trusting this flag's precision
+  T11: high-risk corridor flag (FATF grey/black or sanctioned jurisdiction, any leg)     21,321  (14.21% of 150,000)
+  T11: any leg in a REGIONS.IS_HIGH_RISK region                                   0  ( 0.00% of 150,000)
+  T12: new-counterparty flooding (pct > 40% and >= 2.0x prior period)             0  ( 0.00% of 150,000)
+  T13: dormant reactivation (<= 2 baseline txns, >= USD 250,000 transaction)      7,158  ( 4.77% of 150,000)
+
+========================================================================================
+COMBINED EXPOSURE SCORE (TYPOLOGY_STRENGTH factor, weight 0.20, capped at 100)
+========================================================================================
+  transactions with any typology signal (TOTAL_TYPOLOGY_POINTS > 0)         145,518  (97.01% of 150,000)
+  transactions at the 100-point cap                                           1,504  ( 1.00% of 150,000)
+
+========================================================================================
+OUTPUT
+========================================================================================
+  COMPANY_FRAUD_FEATURES rows                                                 5,000
+  TRANSACTION_FRAUD_FEATURES rows                                           150,000
+  NOTE: written to C:\Users\kuaga\OneDrive\Desktop\scale2026\scale2026\cleaned_data as .csv and .parquet - this is the context/feature table for a model predict() call (e.g. RPT target_columns like OVERALL_RISK_SCORE / IS_ANOMALY), not a prediction itself

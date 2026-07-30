@@ -1,0 +1,98 @@
+.wrap {
+  background: var(--surface);
+  border: 1px solid var(--grid);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-primary);
+}
+
+.empty {
+  font-size: 12px;
+  color: var(--ink-secondary);
+  margin: 0;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 92px 1fr 36px;
+  align-items: center;
+  gap: 10px;
+}
+
+.label {
+  font-size: 12px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+.track {
+  position: relative;
+  height: 10px;
+  border-radius: 4px;
+  background:
+    linear-gradient(
+      to right,
+      transparent 0,
+      transparent calc(25% - 0.5px),
+      var(--grid) calc(25% - 0.5px),
+      var(--grid) calc(25% + 0.5px),
+      transparent calc(25% + 0.5px),
+      transparent calc(50% - 0.5px),
+      var(--grid) calc(50% - 0.5px),
+      var(--grid) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px),
+      transparent calc(75% - 0.5px),
+      var(--grid) calc(75% - 0.5px),
+      var(--grid) calc(75% + 0.5px),
+      transparent calc(75% + 0.5px)
+    ),
+    color-mix(in srgb, var(--grid) 35%, transparent);
+}
+
+.bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink-primary);
+  font-weight: 600;
+}
+
+.axis {
+  display: flex;
+  margin-top: 6px;
+}
+
+.axisSpacer {
+  width: 92px;
+  flex-shrink: 0;
+}
+
+.axisTicks {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  padding-right: 36px;
+}
+
+.axisTicks span {
+  font-size: 10px;
+  color: var(--ink-secondary);
+}

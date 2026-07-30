@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sightline.internal/schemas/risk_assessment_stream_event.json",
+  "title": "SightLine Risk Assessment Stream Event",
+  "description": "Envelope for a single push over the live update channel (WebSocket/SSE) from backend to dashboard. Wraps risk_assessment_schema.json - the frontend never receives a bare assessment object over the stream, only this envelope, so it always knows whether something is new or a re-score of an existing transaction, and can order/dedupe events via `sequence`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_type", "sequence", "emitted_at", "assessment"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": ["ASSESSMENT_CREATED", "ASSESSMENT_UPDATED", "REVIEW_STATUS_CHANGED"],
+      "description": "CREATED: a new transaction was scored for the first time. UPDATED: an existing transaction's risk/typology_signals changed (e.g. a later transaction pushed it into a structuring window). REVIEW_STATUS_CHANGED: only governance.review_status/reviewed_by changed - lets the frontend patch just that field instead of re-rendering the whole row."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing per backend instance. Frontend uses this to detect gaps/dropped events on reconnect (request replay from last-seen sequence) and to ignore out-of-order duplicates, not for cross-instance ordering."
+    },
+    "emitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "assessment": {
+      "$ref": "risk_assessment_schema.json",
+      "description": "Full assessment object. Always sent in full (not a diff) - simplest correct behavior for a dashboard rebuilding row state from streamed events; revisit only if payload size becomes an actual bottleneck."
+    }
+  }
+}

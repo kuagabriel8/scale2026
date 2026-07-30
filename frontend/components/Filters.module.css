@@ -1,0 +1,85 @@
+.wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--grid);
+  margin-bottom: 14px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.groupLabel {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-secondary);
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.pill {
+  --pill-color: var(--ink-secondary);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-secondary);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  padding-left: 16px;
+}
+
+.pill::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--pill-color);
+}
+
+.pill[data-active="true"] {
+  border-color: var(--pill-color);
+  color: var(--ink-primary);
+  background: color-mix(in srgb, var(--pill-color) 14%, transparent);
+  font-weight: 700;
+}
+
+.select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--surface-raised);
+  color: var(--ink-primary);
+  font-size: 12px;
+}
+
+.reset {
+  align-self: flex-end;
+  border: none;
+  background: none;
+  color: var(--cat-placement);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 4px 0;
+}

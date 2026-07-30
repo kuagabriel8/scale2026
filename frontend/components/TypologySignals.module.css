@@ -1,0 +1,99 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-primary);
+}
+
+.emptyNote {
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  margin: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  border: 1px solid var(--grid);
+  border-left-width: 3px;
+  border-left-color: var(--seq-blue-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-secondary);
+  background: color-mix(in srgb, var(--ink-secondary) 12%, transparent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.name {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.points {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.narrative {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  line-height: 1.5;
+}
+
+.details {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+}
+
+.details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.notList {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.75;
+}

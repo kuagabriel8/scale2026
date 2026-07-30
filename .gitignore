@@ -1,0 +1,17 @@
+# environment files
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# node (frontend has its own .gitignore too; these cover anything run from repo root)
+node_modules/
+.next/

@@ -1,0 +1,32 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+  border-left-width: 3px;
+}
+
+.badge[data-status="PENDING"] {
+  border-left-color: var(--ink-secondary);
+}
+.badge[data-status="IN_REVIEW"] {
+  border-left-color: var(--cat-placement);
+  color: var(--ink-primary);
+}
+.badge[data-status="ESCALATED"] {
+  border-left-color: var(--tier-high);
+  color: var(--ink-primary);
+}
+.badge[data-status="CLEARED"] {
+  border-left-color: var(--tier-low);
+  color: var(--ink-primary);
+}
+.badge[data-status="SAR_FILED"] {
+  border-left-color: var(--tier-critical);
+  color: var(--ink-primary);
+}

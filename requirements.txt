@@ -1,0 +1,4 @@
+hdbcli
+requests
+python-dotenv
+hana-ml

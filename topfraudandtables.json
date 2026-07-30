@@ -1,0 +1,281 @@
+{
+  "schema_version": "1.0",
+  "source_schema": "TEAM_03",
+  "description": "Detectable financial crime typologies mapped to available tables and columns. Each typology contributes to the TYPOLOGY_STRENGTH factor (weight 20) of the Exposure score in the SightLine dual-axis triage framework.",
+  "scoring_note": "typology_points are additive but capped at 100 before the 0.20 factor weight is applied. All detection is deterministic and rule-based (light governance path). No LLM participates in scoring.",
+  "typologies": [
+    {
+      "id": "T01",
+      "name": "Structuring / Smurfing",
+      "category": "placement",
+      "confidence": "high",
+      "typology_points": 25,
+      "tables": ["TRANSACTIONS", "SCREENING_RULES"],
+      "key_columns": [
+        "TRANSACTIONS.AMOUNT_ORIGINAL",
+        "TRANSACTIONS.CURRENCY_ORIGINAL",
+        "TRANSACTIONS.ORIGINATOR_COMPANY_ID",
+        "TRANSACTIONS.INITIATED_AT",
+        "SCREENING_RULES.THRESHOLD_VALUE",
+        "SCREENING_RULES.THRESHOLD_CURRENCY",
+        "SCREENING_RULES.TIME_WINDOW_HOURS"
+      ],
+      "logic": "Count transactions per originator within TIME_WINDOW_HOURS where AMOUNT_ORIGINAL falls between (threshold * band_floor) and threshold, matched on currency.",
+      "params": { "band_floor_pct": 0.90, "min_count": 3, "default_window_hours": 72 },
+      "critical_note": "Must be computed on AMOUNT_ORIGINAL, not AMOUNT_USD. FX conversion destroys the just-under-threshold signal.",
+      "narrative_template": "{count} transfers of {currency} {min_amt}-{max_amt} against a {currency} {threshold} reporting threshold within {window_hours} hours."
+    },
+    {
+      "id": "T02",
+      "name": "Velocity Spike",
+      "category": "behavioural_deviation",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["TRANSACTIONS", "TRANSACTION_BASELINES"],
+      "key_columns": [
+        "TRANSACTIONS.AMOUNT_USD",
+        "TRANSACTIONS.INITIATED_AT",
+        "TRANSACTION_BASELINES.AVG_AMOUNT_USD",
+        "TRANSACTION_BASELINES.STDDEV_AMOUNT_USD",
+        "TRANSACTION_BASELINES.AVG_DAILY_COUNT",
+        "TRANSACTION_BASELINES.MAX_DAILY_COUNT"
+      ],
+      "logic": "z = (AMOUNT_USD - AVG_AMOUNT_USD) / STDDEV_AMOUNT_USD for the entity's own baseline period. Also flag daily count exceeding MAX_DAILY_COUNT.",
+      "params": { "z_threshold": 3.0, "daily_count_multiplier": 1.5 },
+      "critical_note": "Guard against STDDEV_AMOUNT_USD null or zero. TRANSACTION_BASELINES has multiple BASELINE_PERIOD rows per company - select one explicitly.",
+      "narrative_template": "Transaction of USD {amount} is {z} standard deviations above this entity's {period} baseline average of USD {baseline_avg}."
+    },
+    {
+      "id": "T03",
+      "name": "Pass-through / Funnel Account",
+      "category": "layering",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["TRANSACTIONS"],
+      "key_columns": [
+        "TRANSACTIONS.ORIGINATOR_COMPANY_ID",
+        "TRANSACTIONS.BENEFICIARY_COMPANY_ID",
+        "TRANSACTIONS.AMOUNT_USD",
+        "TRANSACTIONS.INITIATED_AT",
+        "TRANSACTIONS.SETTLED_AT"
+      ],
+      "logic": "Self-join: company receives as beneficiary then sends as originator within dwell_days, with outbound total >= inflow_retention_pct of inbound total.",
+      "params": { "dwell_days": 5, "inflow_retention_pct": 0.85, "min_leg_count": 2 },
+      "narrative_template": "Entity received USD {inbound} and disbursed USD {outbound} within {dwell_days} days, retaining {retained_pct}% - consistent with pass-through behaviour."
+    },
+    {
+      "id": "T04",
+      "name": "Round-tripping / Circular Flow",
+      "category": "layering",
+      "confidence": "high",
+      "typology_points": 30,
+      "tables": ["TRANSACTIONS"],
+      "key_columns": [
+        "TRANSACTIONS.ORIGINATOR_COMPANY_ID",
+        "TRANSACTIONS.BENEFICIARY_COMPANY_ID",
+        "TRANSACTIONS.AMOUNT_USD",
+        "TRANSACTIONS.INITIATED_AT"
+      ],
+      "logic": "Recursive self-join detecting cycles A->B->C->A within cycle_window_days where final amount is within amount_tolerance_pct of the original.",
+      "params": { "max_hops": 4, "cycle_window_days": 30, "amount_tolerance_pct": 0.15 },
+      "critical_note": "Test cheaply with a 2-hop join on a 6-month subset before committing build time. If the synthetic generator did not plant cycles, this returns nothing.",
+      "narrative_template": "Funds traced through {hop_count} entities returning to origin within {days} days, {tolerance_pct}% amount variance."
+    },
+    {
+      "id": "T05",
+      "name": "Shell Company Layering",
+      "category": "structure",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["COMPANIES", "TRANSACTIONS"],
+      "key_columns": [
+        "COMPANIES.EMPLOYEE_COUNT",
+        "COMPANIES.ANNUAL_REVENUE_USD",
+        "COMPANIES.INCORPORATION_DATE",
+        "COMPANIES.INCORPORATION_COUNTRY_ID",
+        "COMPANIES.HEADQUARTERS_COUNTRY_ID",
+        "COMPANIES.PUBLIC_LISTED"
+      ],
+      "logic": "Substance test: low EMPLOYEE_COUNT relative to high ANNUAL_REVENUE_USD, plus incorporation country differing from headquarters country, plus recent incorporation.",
+      "params": { "max_employees": 5, "min_revenue_usd": 5000000, "recent_incorporation_months": 24 },
+      "narrative_template": "Counterparty reports USD {revenue} annual revenue with {employees} employees, incorporated in {inc_country} but headquartered in {hq_country}."
+    },
+    {
+      "id": "T06",
+      "name": "Nominee / Shared-Owner Network",
+      "category": "structure",
+      "confidence": "high",
+      "typology_points": 25,
+      "tables": ["COMPANY_BENEFICIAL_OWNERS", "COMPANIES"],
+      "key_columns": [
+        "COMPANY_BENEFICIAL_OWNERS.OWNER_NAME",
+        "COMPANY_BENEFICIAL_OWNERS.COMPANY_ID",
+        "COMPANY_BENEFICIAL_OWNERS.OWNERSHIP_PERCENTAGE",
+        "COMPANY_BENEFICIAL_OWNERS.RESIDENCE_COUNTRY_ID"
+      ],
+      "logic": "Normalise OWNER_NAME (upper, strip punctuation, collapse whitespace), group, count distinct COMPANY_ID. Flag owners spanning multiple otherwise unrelated companies.",
+      "params": { "min_companies_per_owner": 3, "fuzzy_match_threshold": 90 },
+      "critical_note": "No owner ID exists in the schema - name normalisation is required and fuzzy matching is the only linkage available.",
+      "demo_value": "primary graph visual",
+      "narrative_template": "{owner_name} appears as beneficial owner across {company_count} companies including {examples}."
+    },
+    {
+      "id": "T07",
+      "name": "Ownership Opacity",
+      "category": "structure",
+      "confidence": "high",
+      "typology_points": 15,
+      "tables": ["COMPANY_BENEFICIAL_OWNERS"],
+      "key_columns": [
+        "COMPANY_BENEFICIAL_OWNERS.COMPANY_ID",
+        "COMPANY_BENEFICIAL_OWNERS.OWNERSHIP_PERCENTAGE",
+        "COMPANY_BENEFICIAL_OWNERS.VERIFIED_DATE"
+      ],
+      "logic": "GROUP BY COMPANY_ID, flag where SUM(OWNERSHIP_PERCENTAGE) < 100 (unexplained ownership) or VERIFIED_DATE is null/stale.",
+      "params": { "min_declared_pct": 100, "stale_verification_months": 24 },
+      "critical_note": "SUM > 100 is a data error, not a signal - exclude from this factor but retain the row.",
+      "narrative_template": "Declared beneficial ownership totals {declared_pct}%, leaving {gap_pct}% unaccounted for."
+    },
+    {
+      "id": "T08",
+      "name": "Corruption / PEP Proceeds",
+      "category": "predicate_offence",
+      "confidence": "high",
+      "typology_points": 30,
+      "tables": ["COMPANY_BENEFICIAL_OWNERS", "COMPANIES", "COUNTRIES"],
+      "key_columns": [
+        "COMPANY_BENEFICIAL_OWNERS.IS_PEP",
+        "COMPANY_BENEFICIAL_OWNERS.PEP_POSITION",
+        "COMPANY_BENEFICIAL_OWNERS.RESIDENCE_COUNTRY_ID",
+        "COMPANIES.PEP_ASSOCIATED",
+        "COUNTRIES.CORRUPTION_INDEX"
+      ],
+      "logic": "PEP present in the ownership chain combined with a residence or transaction jurisdiction above the corruption index threshold.",
+      "params": { "corruption_index_threshold": 60 },
+      "narrative_template": "Beneficial owner {owner_name} is a politically exposed person ({position}) resident in {country}, corruption index {index}."
+    },
+    {
+      "id": "T09",
+      "name": "Sanctions Evasion via Alias",
+      "category": "sanctions",
+      "confidence": "high",
+      "typology_points": 40,
+      "tables": ["TRANSACTIONS", "SANCTIONS_LISTS"],
+      "key_columns": [
+        "TRANSACTIONS.BENEFICIARY_NAME",
+        "SANCTIONS_LISTS.ENTITY_NAME",
+        "SANCTIONS_LISTS.ALIASES",
+        "SANCTIONS_LISTS.IS_ACTIVE",
+        "SANCTIONS_LISTS.EFFECTIVE_DATE",
+        "SANCTIONS_LISTS.EXPIRY_DATE"
+      ],
+      "logic": "Fuzzy match BENEFICIARY_NAME against both ENTITY_NAME and the parsed ALIASES field, filtered to active listings valid at transaction date.",
+      "params": { "fuzzy_match_threshold": 88, "match_alias_field": true },
+      "critical_note": "Most teams will match ENTITY_NAME only. The ALIASES field is where the differentiated hit comes from.",
+      "demo_value": "strong live demo moment",
+      "narrative_template": "Beneficiary '{beneficiary_name}' matches sanctioned alias '{alias}' of {entity_name} ({list_source}, {program}) at {score}% similarity."
+    },
+    {
+      "id": "T10",
+      "name": "Jurisdiction Hopping / U-turn",
+      "category": "geography",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["TRANSACTIONS", "COUNTRIES"],
+      "key_columns": [
+        "TRANSACTIONS.ORIGINATING_COUNTRY_ID",
+        "TRANSACTIONS.DESTINATION_COUNTRY_ID",
+        "TRANSACTIONS.BENEFICIARY_COUNTRY_ID",
+        "TRANSACTIONS.BENEFICIARY_BANK_BIC",
+        "COUNTRIES.FATF_STATUS",
+        "COUNTRIES.RISK_TIER"
+      ],
+      "logic": "Flag divergence between destination country, beneficiary country, and the country implied by BIC positions 5-6. Benign endpoints with a high-risk route.",
+      "params": { "bic_country_offset": [4, 6] },
+      "narrative_template": "Payment routed to {destination} but beneficiary registered in {beneficiary_country} with settlement bank in {bic_country}."
+    },
+    {
+      "id": "T11",
+      "name": "High-risk Corridor Exposure",
+      "category": "geography",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["TRANSACTIONS", "COUNTRIES", "REGIONS"],
+      "key_columns": [
+        "COUNTRIES.FATF_STATUS",
+        "COUNTRIES.SANCTIONS_LIST",
+        "COUNTRIES.CORRUPTION_INDEX",
+        "COUNTRIES.RISK_TIER",
+        "REGIONS.IS_HIGH_RISK"
+      ],
+      "logic": "Map originating, destination and beneficiary country IDs to COUNTRIES risk attributes; take the maximum risk across all legs.",
+      "params": { "fatf_grey_points": 15, "fatf_black_points": 40, "sanctioned_jurisdiction_points": 40 },
+      "narrative_template": "Transaction involves {country}, currently {fatf_status} on the FATF list, corruption index {index}."
+    },
+    {
+      "id": "T12",
+      "name": "New-counterparty Flooding",
+      "category": "behavioural_deviation",
+      "confidence": "high",
+      "typology_points": 15,
+      "tables": ["TRANSACTION_BASELINES", "TRANSACTIONS"],
+      "key_columns": [
+        "TRANSACTION_BASELINES.NEW_COUNTERPARTY_PCT",
+        "TRANSACTION_BASELINES.UNIQUE_COUNTERPARTIES",
+        "TRANSACTION_BASELINES.UNIQUE_COUNTRIES",
+        "TRANSACTION_BASELINES.CROSS_BORDER_PCT"
+      ],
+      "logic": "Flag entities whose NEW_COUNTERPARTY_PCT in the current period materially exceeds their prior period value.",
+      "params": { "new_counterparty_pct_threshold": 40, "period_over_period_multiplier": 2.0 },
+      "narrative_template": "{new_pct}% of counterparties this period were previously unseen, against a prior-period rate of {prior_pct}%."
+    },
+    {
+      "id": "T13",
+      "name": "Dormant Account Reactivation",
+      "category": "behavioural_deviation",
+      "confidence": "high",
+      "typology_points": 20,
+      "tables": ["COMPANIES", "TRANSACTION_BASELINES", "TRANSACTIONS"],
+      "key_columns": [
+        "COMPANIES.RELATIONSHIP_START_DATE",
+        "TRANSACTION_BASELINES.TRANSACTION_COUNT",
+        "TRANSACTION_BASELINES.PERIOD_START",
+        "TRANSACTION_BASELINES.PERIOD_END",
+        "TRANSACTIONS.AMOUNT_USD",
+        "TRANSACTIONS.INITIATED_AT"
+      ],
+      "logic": "Long-standing relationship with near-zero baseline activity followed by a sudden material transaction.",
+      "params": { "dormant_max_txn_count": 2, "dormant_period_months": 12, "reactivation_min_amount_usd": 250000 },
+      "narrative_template": "Entity onboarded {relationship_years} years ago recorded {baseline_count} transactions in the prior {months} months before this USD {amount} transfer."
+    }
+  ],
+  "excluded_typologies": [
+    { "name": "Trade-based money laundering", "reason": "partial - no invoice or shipping data; only implausibility inference via PAYMENT_PURPOSE vs INDUSTRIES" },
+    { "name": "Mirror trading", "reason": "partial - no securities leg in schema" },
+    { "name": "Correspondent / nested banking", "reason": "partial - BENEFICIARY_BANK_BIC only, no bank reference table" },
+    { "name": "Insider / internal fraud", "reason": "deliberately out of scope - AUDIT_LOG user-level analysis triggers German Works Council consultation (4-6 months)" },
+    { "name": "Cash structuring", "reason": "no cash or branch data - institutional payments only" },
+    { "name": "Crypto on/off-ramp", "reason": "no VASP or wallet fields" },
+    { "name": "Retail / card / APP fraud", "reason": "corporate counterparties only" }
+  ],
+  "table_coverage": {
+    "detection_tables": [
+      "TRANSACTIONS",
+      "TRANSACTION_BASELINES",
+      "COMPANIES",
+      "COMPANY_BENEFICIAL_OWNERS",
+      "COUNTRIES",
+      "SCREENING_RULES",
+      "SANCTIONS_LISTS",
+      "REGIONS"
+    ],
+    "minimum_viable_set": ["TRANSACTIONS", "TRANSACTION_BASELINES", "COMPANIES", "COUNTRIES"],
+    "minimum_viable_coverage": "9 of 13 typologies"
+  },
+  "governance": {
+    "scoring_method": "deterministic weighted rules",
+    "validation_path": "light - rule-based prioritisation per TrustSphere Model Risk Management policy",
+    "llm_role": "narrative generation only, grounded strictly in computed factor values and retrieved row data",
+    "prohibited": "no autonomous payment or account blocking; human accountable for all SAR decisions"
+  }
+}

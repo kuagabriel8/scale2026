@@ -1,0 +1,264 @@
+RPT ML TRAINING CYCLE — SIGHTLINE / TRUSTSPHERE
+================================================
+Scope: how SAP-RPT's "training" actually works against this schema, where it
+fits given the T01-T13 governance constraints, what the labeled dataset is,
+and how to split/validate/test it for the AML/fraud-triage use case.
+
+
+1. HOW RPT'S TRAINING CYCLE ACTUALLY WORKS HERE
+------------------------------------------------
+SAP-RPT (as exercised in rpt_predict_demo.py) is a pretrained tabular
+foundation model doing in-context learning, not a model you gradient-train.
+There are no epochs, no loss curves, no weight checkpoints, and no
+"fit()" step. The model's weights are frozen at deployment (see the
+d023a09286a25e04 RPT deployment referenced in .env / RPT env var). Every
+prediction is a single forward pass over a payload that bundles:
+
+  - a `data_schema` describing each column's dtype (numeric / string / date),
+  - a `rows` list of labeled example rows,
+  - one or more target rows with the column to predict masked as "?".
+
+Concretely for this schema: if the target column is
+TRANSACTION_RISK_SCORES.OVERALL_RISK_SCORE or IS_ANOMALY, the "training set"
+for that single API call is whatever rows get selected and serialized into
+`rows` for that call — e.g. a sample of historically-scored transactions
+joined to TRANSACTIONS and TRANSACTION_BASELINES columns, with the current
+transaction's target column set to "?". There is no persistent "trained
+model artifact" produced by SightLine; the context-row selection logic
+(which rows, how many, which columns) IS the entire "training procedure",
+re-executed per call. This has direct consequences:
+
+  - Nothing is learned or retained between calls — updating the "model"
+    means changing which rows/columns you pass next time, not retraining.
+  - Because there is no persisted model, there is no drift in the model
+    itself; drift instead shows up as the context pool going stale (e.g.
+    TRANSACTION_BASELINES periods rolling forward, typology params changing).
+  - "Improving the model" over time == improving the pipeline that builds
+    the payload (context selection, schema, feature engineering) — this is
+    the actual object of iteration, not model weights.
+
+
+2. WHERE RPT FITS GIVEN THE GOVERNANCE CONSTRAINT
+--------------------------------------------------
+topfraudandtables.json is explicit: typology detection T01-T13 is
+"deterministic weighted rules" (governance.scoring_method), with
+governance.llm_role limited to "narrative generation only, grounded
+strictly in computed factor values and retrieved row data", and
+governance.prohibited bars "autonomous payment or account blocking" and
+requires a human to be "accountable for all SAR decisions." RPT must NOT
+be used to reimplement, replace, or second-guess the T01-T13 rule logic
+(structuring, velocity spike, round-tripping, sanctions alias matching,
+etc.) — that layer stays deterministic and auditable by design.
+
+RPT's natural fit is the separate ML scoring layer that already exists in
+the schema, distinct from typology detection:
+
+  - COMPANY_RISK_PROFILES.ML_RISK_SCORE / ML_CONFIDENCE / ML_MODEL_VERSION /
+    ML_SCORED_AT — company-level risk regression.
+  - TRANSACTION_RISK_SCORES.OVERALL_RISK_SCORE / MODEL_CONFIDENCE /
+    IS_ANOMALY / ANOMALY_TYPE / ANOMALY_DETAILS / FEATURE_VECTOR —
+    transaction-level risk regression + anomaly classification.
+
+RECOMMENDATION: use RPT to predict/regress these ML_* and
+TRANSACTION_RISK_SCORES columns, with the deterministic typology outputs
+(T01-T13 flags and typology_points, capped at 100 per
+topfraudandtables.json's scoring_note) as ENGINEERED INPUT FEATURES to the
+`data_schema` / `rows` payload — not as raw source columns RPT re-derives.
+Alongside these, feed baseline statistics from TRANSACTION_BASELINES
+(AVG_AMOUNT_USD, STDDEV_AMOUNT_USD, NEW_COUNTERPARTY_PCT, etc.) as
+additional numeric context. In this framing RPT sits downstream of the
+rule engine, consuming its outputs as features rather than competing with
+it — the rules stay the auditable, deterministic "why", and RPT adds a
+complementary statistical signal ("how anomalous does this look relative
+to similar historical cases") that a human analyst can weigh alongside
+the rule-based typology strength.
+
+This must remain a decision-support signal only: ML_RISK_SCORE / IS_ANOMALY
+outputs feed RISK_ALERTS / COMPLIANCE_CASES for analyst review, never an
+autonomous block or auto-filed SAR, consistent with the governance
+"prohibited" clause. ML_CONFIDENCE should always accompany the score so
+analysts can see how much weight to give it.
+
+
+3. WHAT CONSTITUTES THE LABELED DATASET
+-----------------------------------------
+The label pool is historically RESOLVED outcomes, not open cases:
+
+  - COMPLIANCE_CASES.OUTCOME and SAR_FILED (plus SAR_FILING_DATE) — the
+    strongest ground truth: a case was investigated to completion and a
+    determination was made.
+  - RISK_ALERTS.RESOLUTION_CODE and STATUS (only rows where STATUS
+    indicates closed/resolved, not OPEN/IN_PROGRESS) — a weaker but larger
+    secondary label source for alert-level true/false positive.
+
+These resolved rows are joined back to their originating facts to build
+one training example per resolved case/alert:
+  - RISK_ALERTS.TRANSACTION_ID / COMPANY_ID -> TRANSACTIONS,
+    COMPANY_RISK_PROFILES, TRANSACTION_BASELINES.
+  - COMPLIANCE_CASES.COMPANY_ID -> COMPANIES, COMPANY_BENEFICIAL_OWNERS.
+  - CASE_ALERTS bridges COMPLIANCE_CASES to RISK_ALERTS where a case
+    aggregates multiple alerts.
+  - Computed typology signals (T01-T13 flags/points, recomputed
+    deterministically at the row's reference date) are attached as
+    engineered features, not sourced from an ML model.
+
+The union of these joined, resolved rows forms the pool from which
+per-call context rows are sampled at RPT prediction time. Any alert/case
+still in an open STATUS (RISK_ALERTS) or open STATUS (COMPLIANCE_CASES,
+i.e. not yet reaching a terminal OUTCOME) is excluded from the labeled
+pool entirely — it has no ground truth yet and must not leak in as a
+"labeled" context row.
+
+
+4. TRAIN / VALIDATION / TEST SPLIT STRATEGY
+---------------------------------------------
+a) TIME-BASED, NOT RANDOM.
+   Split on a case/alert reference timestamp (COMPLIANCE_CASES.CLOSED_AT
+   or RISK_ALERTS.RESOLVED_AT): train on the oldest resolved slice,
+   validate on a more recent slice, test on the most recent held-out
+   slice. Justification: fraud typologies drift (new laundering patterns
+   emerge, screening rule THRESHOLD_VALUE and typology params change over
+   time), and several typologies (T02 Velocity Spike, T12 New-counterparty
+   Flooding, T13 Dormant Reactivation) are computed directly against
+   TRANSACTION_BASELINES rows tied to specific PERIOD_START/PERIOD_END
+   windows. A random shuffle would let a training-context row's baseline
+   period overlap with, or postdate, a test row's evaluation period —
+   leaking future distributional information (what "normal" looked like
+   after the test point) into the context pool. A strict time cutoff
+   avoids this by construction.
+
+b) ENTITY-LEVEL, NOT ROW-LEVEL (split by COMPANY_ID).
+   Every COMPANY_ID must fall entirely within one split. Do not let the
+   same company appear as a context example in training and again as a
+   test row. RPT does in-context pattern matching on the row values it is
+   given; if a company's other transactions/baseline stats are visible in
+   the context pool used at training/validation time, and that same
+   company reappears in the test slice, the model can effectively
+   memorize that company's specific behavioral signature rather than
+   generalizing the typology signal, inflating apparent precision/recall.
+   Concretely, partition unique COMPANY_ID values first, then take all
+   TRANSACTIONS, RISK_ALERTS, COMPLIANCE_CASES rows for a company as one
+   indivisible unit assigned to exactly one split. Note ORIGINATOR and
+   BENEFICIARY company IDs on TRANSACTIONS mean cross-company edges exist
+   (T03 pass-through, T04 round-tripping, T06 nominee networks); where a
+   transaction spans a train-side and test-side company, prefer assigning
+   the whole transaction to the split of the entity under investigation
+   (the alert/case's COMPANY_ID) and flag such cross-split edges for
+   manual review rather than silently including them in context.
+
+c) STRATIFY BY TYPOLOGY AND BY OUTCOME (SAR filed vs not).
+   AML data is heavily class-imbalanced: SAR_FILED = TRUE and outcomes
+   indicating confirmed fraud are almost certainly a small minority of
+   COMPLIANCE_CASES rows, and coverage across T01-T13 will itself be
+   uneven (typology_points differ: T09 Sanctions Evasion is highest-value
+   at 40 points but likely rare; T02 Velocity Spike likely more common).
+   Stratify the entity-level split so each of train/validation/test
+   contains a representative share of SAR_FILED=TRUE cases and a spread
+   of typology categories (placement, layering, structure, geography,
+   behavioural_deviation, sanctions, predicate_offence) — not just an
+   overall row count match. Given likely scarcity of positives, oversample
+   or upweight SAR_FILED=TRUE / confirmed-typology rows ONLY within the
+   context-row selection for a given RPT call (i.e., bias which labeled
+   rows get sampled into `rows` so the model sees enough positive
+   examples to learn the pattern) — never duplicate or synthesize rows
+   into the validation or test slices themselves, since that would
+   artificially inflate measured recall/precision on data that no longer
+   reflects the true production base rate.
+
+d) SUGGESTED RATIOS.
+   Default 70/15/15 (train/validation/test) by COMPANY_ID, time-ordered
+   as in (a). If SAR-filed cases are as scarce as expected (a strong
+   likelihood given the schema has no explicit case-volume figures to
+   verify against), lean toward a more test-generous split such as
+   60/15/25 or explicitly floor the validation and test slices at a
+   minimum absolute count of SAR_FILED=TRUE cases (e.g. at least 15-20
+   positive cases in each of validation and test) even if that pushes the
+   ratio away from a clean 70/15/15 — a validation/test slice with only 2-3
+   positive examples cannot produce a stable precision/recall estimate.
+   Tradeoff: a larger test slice gives a more statistically reliable final
+   read on rare-positive performance but leaves fewer historical resolved
+   cases available as in-context examples for training-time iteration;
+   given RPT needs no epochs, the training slice mainly needs to be large
+   and diverse enough to supply good few-shot context rows, not to drive
+   a lengthy optimization loop, so erring toward a richer validation/test
+   slice for the imbalanced positive class is the safer choice here.
+
+
+5. VALIDATION METHODOLOGY SPECIFIC TO IN-CONTEXT MODELS
+----------------------------------------------------------
+There is no training epoch to checkpoint against, so "validation" here
+does not mean early-stopping on a loss curve. It means tuning the
+CONTEXT COMPOSITION for each predict() call against the held-out
+validation slice, specifically:
+
+  - Which columns go into `data_schema` (e.g. does adding
+    TRANSACTION_BASELINES.NEW_COUNTERPARTY_PCT alongside T12's typology
+    flag improve detection of new-counterparty flooding, or is it
+    redundant with the flag already computed from it?).
+  - How many labeled context rows (the few-shot count) to include per
+    call — too few starves the model of pattern examples, too many risks
+    diluting the specific signal or hitting payload size limits (see
+    caveat section 7).
+  - How context rows are selected/weighted (e.g. nearest-neighbor by
+    typology category vs. random stratified sample vs. recency-weighted
+    sample within the training-period pool).
+
+Each candidate configuration is run over the validation slice's known
+outcomes, and precision/recall/F1 are computed against
+COMPLIANCE_CASES.OUTCOME / SAR_FILED and RISK_ALERTS.RESOLUTION_CODE as
+ground truth for the predicted ML_RISK_SCORE tier / IS_ANOMALY /
+ANOMALY_TYPE. The context configuration is the actual hyperparameter
+being tuned in this workflow, not a learning-rate or tree-depth.
+
+
+6. TEST METHODOLOGY
+-----------------------
+Final blind evaluation runs once, on the test slice only, using whichever
+context configuration was selected in step 5. Critically, the context
+rows used for these test-slice predict() calls must be fixed entirely
+from the TRAINING-period pool (by COMPANY_ID and by time cutoff) — never
+drawn from validation-slice or test-slice rows, otherwise the test result
+would reuse information from the same partition being scored. Report:
+
+  - Precision / recall / F1 per typology category (placement, layering,
+    structure, geography, behavioural_deviation, sanctions,
+    predicate_offence) and per individual typology ID (T01-T13) where
+    volume allows, plus an overall aggregate.
+  - Confusion between ANOMALY_TYPE predictions and RESOLUTION_CODE /
+    OUTCOME ground truth, to see whether RPT's anomaly typing aligns with
+    what analysts actually concluded.
+  - Confidence calibration: bucket predictions by ML_CONFIDENCE /
+    MODEL_CONFIDENCE and check whether actual outcome-match rate tracks
+    the stated confidence (e.g. do 90%-confidence predictions resolve
+    correctly ~90% of the time) — a reliability/calibration curve, not
+    just a single accuracy number, since analysts will use ML_CONFIDENCE
+    to prioritize review queues.
+
+
+7. CAVEATS — VERIFY BEFORE PRODUCTIONIZING
+---------------------------------------------
+This document deliberately avoids asserting exact numeric limits that are
+not confirmed anywhere in the source files reviewed (databasetables.txt,
+topfraudandtables.json, rpt_predict_demo.py, .env). Specifically NOT
+verified here and requiring confirmation against current SAP
+documentation for the exact deployed model version (the deployment ID
+referenced by the RPT env var) before finalizing production design:
+
+  - The maximum number of context rows (few-shot count) or total payload
+    size / token-equivalent limit the deployed RPT endpoint accepts per
+    predict() call.
+  - The full set of supported `task_type` values beyond "classification"
+    seen in the demo script (e.g. whether regression is supported
+    identically, and what task_type value ML_RISK_SCORE / OVERALL_RISK_SCORE
+    regression should use).
+  - Whether any fine-tuning, adapter-tuning, or persistent customization
+    mechanism is offered at all for this deployment, versus purely
+    stateless in-context inference as shown in rpt_predict_demo.py.
+  - Any rate limits, latency budgets, or cost-per-call implications of
+    large context payloads that would affect how many rows can realistically
+    be included per production scoring call.
+
+Recommendation: treat every claim in this document about "how many
+context rows" or "which task types" as a design placeholder to be
+validated against SAP's current RPT/AI Core documentation for the deployed
+model version, not as a confirmed production limit.

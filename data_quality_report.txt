@@ -1,0 +1,162 @@
+SightLine Data Quality Report - source schema: TEAM_03
+Detection tables (8): TRANSACTIONS, TRANSACTION_BASELINES, COMPANIES, COMPANY_BENEFICIAL_OWNERS, COUNTRIES, SCREENING_RULES, SANCTIONS_LISTS, REGIONS
+
+========================================================================================
+NULL / MISSING VALUE AUDIT (nullable columns only, per databasetables.txt)
+========================================================================================
+
+----------------------------------------------------------------------------------------
+TRANSACTIONS (total rows: 150,000)
+----------------------------------------------------------------------------------------
+  no nulls found in any nullable column
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+TRANSACTION_BASELINES (total rows: 150,000)
+----------------------------------------------------------------------------------------
+  no nulls found in any nullable column
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+COMPANIES (total rows: 5,000)
+----------------------------------------------------------------------------------------
+  LEI_CODE                                                          5,000  (100.00% of 5,000)
+  STOCK_EXCHANGE                                                    5,000  (100.00% of 5,000)
+  TICKER_SYMBOL                                                     5,000  (100.00% of 5,000)
+  RELATIONSHIP_MANAGER_ID                                           5,000  (100.00% of 5,000)
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+COMPANY_BENEFICIAL_OWNERS (total rows: 12,516)
+----------------------------------------------------------------------------------------
+  PEP_POSITION                                                     12,260  (97.95% of 12,516)
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+COUNTRIES (total rows: 23)
+----------------------------------------------------------------------------------------
+  no nulls found in any nullable column
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+SCREENING_RULES (total rows: 50)
+----------------------------------------------------------------------------------------
+  THRESHOLD_VALUE                                                      31  (62.00% of 50)
+  TIME_WINDOW_HOURS                                                    50  (100.00% of 50)
+  EXPIRY_DATE                                                          50  (100.00% of 50)
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+SANCTIONS_LISTS (total rows: 500)
+----------------------------------------------------------------------------------------
+  EXPIRY_DATE                                                         500  (100.00% of 500)
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+----------------------------------------------------------------------------------------
+REGIONS (total rows: 5)
+----------------------------------------------------------------------------------------
+  REGULATORY_FRAMEWORK                                                  5  (100.00% of 5)
+  TIMEZONE                                                              5  (100.00% of 5)
+  NOTE: financial/amount fields are never imputed here - null AMOUNT/rate fields must be excluded from downstream calcs, not filled in
+
+========================================================================================
+DUPLICATE / NATURAL KEY CHECKS
+========================================================================================
+  TRANSACTIONS: duplicate TRANSACTION_ID (primary key)                  0
+  TRANSACTIONS: duplicate TRANSACTION_UUID (natural key)                0
+  TRANSACTION_BASELINES: duplicate BASELINE_ID (primary key)            0
+  COMPANIES: duplicate COMPANY_ID (primary key)                         0
+  COMPANIES: duplicate COMPANY_UUID (natural key)                       0
+  COMPANY_BENEFICIAL_OWNERS: duplicate OWNER_ID (primary key)           0
+  COUNTRIES: duplicate COUNTRY_ID (primary key)                         0
+  COUNTRIES: duplicate COUNTRY_CODE (natural key)                       0
+  SCREENING_RULES: duplicate RULE_ID (primary key)                      0
+  SCREENING_RULES: duplicate RULE_CODE (natural key)                    0
+  SANCTIONS_LISTS: duplicate SANCTIONS_ID (primary key)                 0
+  REGIONS: duplicate REGION_ID (primary key)                            0
+  REGIONS: duplicate REGION_CODE (natural key)                          0
+
+========================================================================================
+REFERENTIAL INTEGRITY (orphaned foreign keys)
+========================================================================================
+  TRANSACTIONS.ORIGINATOR_COMPANY_ID -> COMPANIES.COMPANY_ID            0
+  TRANSACTIONS.BENEFICIARY_COMPANY_ID -> COMPANIES.COMPANY_ID           0
+  TRANSACTIONS.ORIGINATING_COUNTRY_ID -> COUNTRIES.COUNTRY_ID           0
+  TRANSACTIONS.DESTINATION_COUNTRY_ID -> COUNTRIES.COUNTRY_ID           0
+  TRANSACTIONS.BENEFICIARY_COUNTRY_ID -> COUNTRIES.COUNTRY_ID           0
+  COMPANIES.INCORPORATION_COUNTRY_ID -> COUNTRIES.COUNTRY_ID            0
+  COMPANIES.HEADQUARTERS_COUNTRY_ID -> COUNTRIES.COUNTRY_ID             0
+  COMPANIES.INDUSTRY_ID -> INDUSTRIES.INDUSTRY_ID                       0
+  COMPANY_BENEFICIAL_OWNERS.COMPANY_ID -> COMPANIES.COMPANY_ID          0
+  COMPANY_BENEFICIAL_OWNERS.NATIONALITY_COUNTRY_ID -> COUNTRIES.COUNTRY_ID          0
+  COMPANY_BENEFICIAL_OWNERS.RESIDENCE_COUNTRY_ID -> COUNTRIES.COUNTRY_ID          0
+  SANCTIONS_LISTS.COUNTRY_ID -> COUNTRIES.COUNTRY_ID                    0
+  COUNTRIES.REGION_ID -> REGIONS.REGION_ID                              0
+  TRANSACTION_BASELINES.COMPANY_ID -> COMPANIES.COMPANY_ID              0
+
+========================================================================================
+RANGE / TYPE SANITY CHECKS
+========================================================================================
+  TRANSACTIONS: AMOUNT_ORIGINAL <= 0                                    0  ( 0.00% of 150,000)
+  TRANSACTIONS: AMOUNT_USD <= 0                                         0  ( 0.00% of 150,000)
+  TRANSACTIONS: EXCHANGE_RATE <= 0 (non-null only)                      0  ( 0.00% of 150,000)
+  TRANSACTIONS: INITIATED_AT > SETTLED_AT (non-null only)               0  ( 0.00% of 150,000)
+  TRANSACTION_BASELINES: PERIOD_START > PERIOD_END                      0  ( 0.00% of 150,000)
+  COMPANY_BENEFICIAL_OWNERS: OWNERSHIP_PERCENTAGE outside [0,100]          0  ( 0.00% of 12,516)
+
+========================================================================================
+TYPOLOGY-SPECIFIC DATA-QUALITY GUARDS (from topfraudandtables.json critical_note fields)
+========================================================================================
+
+----------------------------------------------------------------------------------------
+T01 Structuring / Smurfing
+----------------------------------------------------------------------------------------
+  NOTE: Must be computed on AMOUNT_ORIGINAL, not AMOUNT_USD. FX conversion destroys the just-under-threshold signal.
+  guard: structuring_view() below selects AMOUNT_ORIGINAL/CURRENCY_ORIGINAL only and never substitutes AMOUNT_USD for threshold comparisons
+
+----------------------------------------------------------------------------------------
+T02 Velocity Spike
+----------------------------------------------------------------------------------------
+  NOTE: Guard against STDDEV_AMOUNT_USD null or zero. TRANSACTION_BASELINES has multiple BASELINE_PERIOD rows per company - select one explicitly.
+  baseline rows with NULL/zero STDDEV_AMOUNT_USD (z-score undefined)    110,488  (73.66% of 150,000)
+  companies with >1 BASELINE_PERIOD row (ambiguous - no row picked automatically)      5,000  (100.00% of 5,000)
+  NOTE: this script does not pick a baseline row on companies' behalf; downstream feature engineering must select one explicitly (e.g. most recent PERIOD_END) before computing z-scores
+
+----------------------------------------------------------------------------------------
+T06 Nominee / Shared-Owner Network
+----------------------------------------------------------------------------------------
+  NOTE: No owner ID exists in the schema - name normalisation is required and fuzzy matching is the only linkage available.
+  normalized owner names linked to 3+ distinct companies (nominee candidates)          0
+  total beneficial-owner rows                                      12,516
+  NOTE: no OWNER_ID/global identity exists in the schema - OWNER_NAME_NORMALIZED is the only linkage key available and fuzzy matching (rapidfuzz/thefuzz) is required downstream for near-duplicate spellings
+
+----------------------------------------------------------------------------------------
+T07 Ownership Opacity
+----------------------------------------------------------------------------------------
+  NOTE: SUM > 100 is a data error, not a signal - exclude from this factor but retain the row.
+  companies with SUM(OWNERSHIP_PERCENTAGE) > 100 (DATA ERROR - rows retained, excluded from opacity scoring)      1,717  (34.34% of 5,000)
+  companies with SUM(OWNERSHIP_PERCENTAGE) < 100 (unexplained ownership signal)      3,282  (65.64% of 5,000)
+  NOTE: rows are never dropped for either condition; SUM>100 companies must be excluded from the T07 opacity *score* only, not from the returned dataset
+
+----------------------------------------------------------------------------------------
+T09 Sanctions Evasion via Alias
+----------------------------------------------------------------------------------------
+  NOTE: Most teams will match ENTITY_NAME only. The ALIASES field is where the differentiated hit comes from.
+  ALIASES field pattern: EMPTY_JSON_ARRAY                             500  (100.00% of 500)
+  exploded (SANCTIONS_ID, alias) rows produced                          0
+  NOTE: ALIASES currently contains only empty JSON arrays ('[]') for every row in this environment - the alias-matching path of T09 will surface zero additional hits beyond ENTITY_NAME matching until this field is populated. The explode/normalize logic itself is verified working (tested against synthetic JSON arrays) and is ready as soon as real alias data lands.
+
+----------------------------------------------------------------------------------------
+T10 Jurisdiction Hopping / U-turn
+----------------------------------------------------------------------------------------
+  NOTE: BIC positions 5-6 identify the country only if the BIC is a valid 8 or 11-char SWIFT code - invalid lengths must not be sliced blindly
+  non-null BENEFICIARY_BANK_BIC values                            150,000
+  BIC values with invalid length (neither 8 nor 11 chars - excluded from country-code extraction)          0  ( 0.00% of 150,000)
+
+========================================================================================
+ACTIVE-WINDOW VIEWS (IS_ACTIVE + EFFECTIVE/EXPIRY validity, stale rows retained not deleted)
+========================================================================================
+  SANCTIONS_LISTS: rows in active/valid window                        500  (100.00% of 500)
+  SANCTIONS_LISTS: rows excluded (inactive or outside effective/expiry window)          0  ( 0.00% of 500)
+  SCREENING_RULES: rows in active/valid window                         50  (100.00% of 50)
+  SCREENING_RULES: rows excluded (inactive or outside effective/expiry window)          0  ( 0.00% of 50)

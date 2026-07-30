@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sightline.internal/schemas/risk_assessment_schema.json",
+  "title": "SightLine Transaction Risk Assessment",
+  "description": "API contract for a single transaction's risk assessment. Combines the deterministic T01-T13 typology layer (topfraudandtables.json, computed by build_fraud_features.py - always populated, rule-based, auditable) with the ML/RPT scoring layer (TRANSACTION_RISK_SCORES columns - populated once a real model is wired in; frontend should mock this half with dummy data shaped exactly like this schema). Backend and frontend should both validate against this file so either side can be built independently and swapped later without changing the contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["transaction_id", "transaction_uuid", "scored_at", "model_version", "risk", "typology_signals", "exposure", "explanation", "governance"],
+  "properties": {
+    "transaction_id": {
+      "type": "integer",
+      "description": "TRANSACTIONS.TRANSACTION_ID"
+    },
+    "transaction_uuid": {
+      "type": "string",
+      "description": "TRANSACTIONS.TRANSACTION_UUID"
+    },
+    "scored_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this assessment was produced"
+    },
+    "model_version": {
+      "type": "string",
+      "description": "Identifies which scorer produced `risk` - e.g. an RPT deployment ID (see .env RPT var), or \"rule-engine-only\" when only the deterministic typology layer ran and no ML score exists yet"
+    },
+    "risk": {
+      "type": "object",
+      "description": "ML/RPT scoring layer - mirrors TRANSACTION_RISK_SCORES table columns. Mock with dummy values until RPT is wired in.",
+      "additionalProperties": false,
+      "required": ["overall_risk_score", "risk_tier", "model_confidence", "is_anomaly"],
+      "properties": {
+        "overall_risk_score": {
+          "type": "number", "minimum": 0, "maximum": 100,
+          "description": "TRANSACTION_RISK_SCORES.OVERALL_RISK_SCORE"
+        },
+        "risk_tier": {
+          "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+          "description": "TRANSACTION_RISK_SCORES.RISK_TIER"
+        },
+        "model_confidence": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "TRANSACTION_RISK_SCORES.MODEL_CONFIDENCE - always show alongside overall_risk_score per rpt_ml_training_cycle.txt so analysts can weigh it"
+        },
+        "is_anomaly": {
+          "type": "boolean",
+          "description": "TRANSACTION_RISK_SCORES.IS_ANOMALY"
+        },
+        "anomaly_type": {
+          "type": ["string", "null"],
+          "description": "TRANSACTION_RISK_SCORES.ANOMALY_TYPE - null when is_anomaly is false"
+        },
+        "component_scores": {
+          "type": "object",
+          "description": "Sub-scores backing overall_risk_score - all optional, all TRANSACTION_RISK_SCORES columns",
+          "additionalProperties": false,
+          "properties": {
+            "amount_risk_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "frequency_risk_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "geography_risk_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "counterparty_risk_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "pattern_risk_score": { "type": "number", "minimum": 0, "maximum": 100 },
+            "velocity_risk_score": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "typology_signals": {
+      "type": "array",
+      "description": "One entry per typology from topfraudandtables.json that was evaluated for this transaction. Always populated by the deterministic rule engine (build_fraud_features.py) regardless of whether the ML layer has run - this is the auditable half of the contract.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "category", "triggered", "points"],
+        "properties": {
+          "id": {
+            "type": "string", "pattern": "^T(0[1-9]|1[0-3])$",
+            "description": "T01-T13 per topfraudandtables.json"
+          },
+          "name": { "type": "string" },
+          "category": {
+            "type": "string",
+            "enum": ["placement", "layering", "structure", "geography", "behavioural_deviation", "sanctions", "predicate_offence"]
+          },
+          "triggered": { "type": "boolean" },
+          "points": {
+            "type": "integer", "minimum": 0, "maximum": 40,
+            "description": "typology_points contributed if triggered, else 0"
+          },
+          "narrative": {
+            "type": ["string", "null"],
+            "description": "Populated per typology's narrative_template when triggered, else null"
+          }
+        }
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "description": "Aggregated TYPOLOGY_STRENGTH factor per topfraudandtables.json's scoring_note (additive, capped at 100, weight 0.20)",
+      "additionalProperties": false,
+      "required": ["typology_strength_points", "exposure_factor"],
+      "properties": {
+        "typology_strength_points": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "exposure_factor": { "type": "number", "minimum": 0, "maximum": 20 }
+      }
+    },
+    "explanation": {
+      "type": "object",
+      "description": "RPT's in-context explanation output (see rpt_predict_demo.py's `explanations` config) plus a grounded narrative. Per governance.llm_role: any free-text narrative here must be grounded strictly in typology_signals/risk/computed factor values - not an independent model judgment.",
+      "additionalProperties": false,
+      "properties": {
+        "top_column_scores": {
+          "type": "array",
+          "description": "Mirrors RPT's explanations.top_column_scores",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["column", "contribution_score"],
+            "properties": {
+              "column": { "type": "string" },
+              "contribution_score": { "type": "number" }
+            }
+          }
+        },
+        "top_relevant_context_rows": {
+          "type": "array",
+          "description": "Mirrors RPT's explanations.top_relevant_context_rows - the historical resolved cases most similar to this one",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reference_id", "similarity_score"],
+            "properties": {
+              "reference_id": {
+                "type": "string",
+                "description": "e.g. a COMPLIANCE_CASES.CASE_UUID or RISK_ALERTS.ALERT_UUID this context row came from"
+              },
+              "similarity_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "outcome": {
+                "type": ["string", "null"],
+                "description": "COMPLIANCE_CASES.OUTCOME / RISK_ALERTS.RESOLUTION_CODE for that historical case, if resolved"
+              }
+            }
+          }
+        },
+        "narrative_text": {
+          "type": ["string", "null"],
+          "description": "Human-readable summary grounded in typology_signals and risk fields only"
+        }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "description": "Per topfraudandtables.json governance clause - enforced fields, not optional metadata",
+      "additionalProperties": false,
+      "required": ["requires_human_review", "review_status"],
+      "properties": {
+        "requires_human_review": {
+          "const": true,
+          "description": "Always true - no autonomous payment/account blocking is permitted; a human must be accountable for all SAR decisions"
+        },
+        "review_status": {
+          "type": "string",
+          "enum": ["PENDING", "IN_REVIEW", "ESCALATED", "CLEARED", "SAR_FILED"]
+        },
+        "reviewed_by": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

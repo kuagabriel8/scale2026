@@ -1,7 +1,7 @@
 """ML/RPT scoring layer abstraction.
 
 `BaseScorer.score()` produces the `risk` + `explanation` halves of
-risk_assessment_schema.json. Two implementations:
+risk_assessment_schema.json. Three implementations:
 
   - `DummyScorer`: fabricates deterministic-but-varied values that
     correlate with the deterministic rule layer (TOTAL_TYPOLOGY_POINTS)
@@ -10,17 +10,29 @@ risk_assessment_schema.json. Two implementations:
     app/config.py) and as RPTScorer's internal fallback on any failure.
   - `RPTScorer`: the real SAP-RPT integration (sap-rpt-1.5-large tabular
     foundation model, in-context regression/classification, no gradient
-    training - see rpt_ml_training_cycle.txt). Active by default
-    (SCORER=rpt). See its class docstring below for the full design,
-    including the proxy-label caveat for its few-shot context pool.
+    training - see rpt_ml_training_cycle.txt). See its class docstring below
+    for the full design, including the proxy-label caveat for its few-shot
+    context pool.
+  - `SklearnScorer`: an independent, offline-trained classical model
+    (GradientBoostingRegressor + RandomForestClassifier, see
+    ../train_sklearn_scorer.py / ../sklearn_model_report.txt / its own class
+    docstring below). Loads pre-trained joblib artifacts from ml_models/ -
+    never retrains anything at runtime.
 
-app/main.py's lifespan picks which one to instantiate based on
-settings.SCORER - no other caller needs to change; every caller depends
-only on BaseScorer.score().
+app/main.py's lifespan constructs ALL THREE scorers unconditionally and
+hands them to DataStore keyed by name ("rpt"/"sklearn"/"dummy"), plus which
+one is the *default* (settings.SCORER - used by the shared background
+stream simulator and any request without an explicit `?model=` choice). A
+caller (REST query param, WS message field) can pick per-request via
+DataStore.list_assessments/get_assessment's `model` argument - see
+app/routers/risk_assessments.py and app/routers/ws.py. Every caller still
+only ever depends on BaseScorer.score().
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -29,6 +41,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+import joblib
+import numpy as np
 import pandas as pd
 
 from . import scoring_math
@@ -92,7 +106,13 @@ class ScoringContext:
 
 class BaseScorer(ABC):
     """Interface for the ML/RPT scoring layer. A real implementation is a
-    drop-in replacement - callers only ever depend on this method."""
+    drop-in replacement - callers only ever depend on this method. Every
+    concrete scorer also exposes a `model_version` (class attribute, may be
+    overridden per-instance) so DataStore can report which model produced a
+    given assessment's `model_version` field without callers needing to know
+    which scorer they got."""
+
+    model_version: str = "unknown"
 
     @abstractmethod
     def score(self, ctx: ScoringContext) -> dict[str, Any]:
@@ -109,6 +129,8 @@ class DummyScorer(BaseScorer):
     return identical numbers unless update_count changes (simulated
     re-score), and results always correlate with the rule layer rather than
     looking random."""
+
+    model_version = "dummy-mock-v0"
 
     def score(self, ctx: ScoringContext) -> dict[str, Any]:
         triggered = [s for s in ctx.typology_signals if s["triggered"]]
@@ -278,6 +300,8 @@ class RPTScorer(BaseScorer):
     fabricated one. Never treat context-pool rows as real resolved
     cases/alerts beyond this narrow few-shot-example role.
     """
+
+    model_version = "sap-rpt-1.5-large"
 
     # Class-level so the (small, ~200-row) context pool and the OAuth token
     # are shared across RPTScorer instances/requests within a process
@@ -599,6 +623,302 @@ class RPTScorer(BaseScorer):
         else:
             narrative_text = (
                 f"No deterministic typology signals triggered. SAP-RPT few-shot estimate: "
+                f"overall risk {risk['overall_risk_score']} ({risk['risk_tier']}, confidence "
+                f"{risk['model_confidence']})."
+            )
+
+        return {
+            "top_column_scores": top_column_scores,
+            "top_relevant_context_rows": top_relevant_context_rows,
+            "narrative_text": narrative_text,
+        }
+
+
+# ---------------------------------------------------------------------------
+# SklearnScorer: independent, offline-trained classical model
+# ---------------------------------------------------------------------------
+
+# Column lists mirroring ../train_sklearn_scorer.py's feature-set constants
+# EXACTLY (duplicated on purpose, same reasoning as RPTScorer's _TYPOLOGY_IDS
+# above: this module can't import the training script, and the training
+# script must stay runnable standalone without a backend/ dependency). These
+# must match ml_models/feature_schema.json's bool_features/numeric_features/
+# categorical_features_frequency_encoded byte-for-byte - if the artifacts are
+# ever retrained with a different feature set, feature_schema.json itself
+# (loaded at runtime below) is the actual source of truth for feature_order/
+# dtypes; these lists only drive which *raw* parquet columns get pulled in.
+_SKLEARN_TX_BOOL_COLS = [
+    "T01_STRUCTURING_FLAG", "T02_VELOCITY_FLAG", "T02_DAILY_COUNT_FLAG",
+    "T03_PASSTHROUGH_FLAG", "T04_ROUNDTRIP_FLAG", "T09_SANCTIONS_FLAG",
+    "T10_BIC_COUNTRY_UNMAPPED", "T10_JURISDICTION_HOP_FLAG",
+    "T11_HIGH_RISK_CORRIDOR_FLAG", "T11_ANY_LEG_HIGH_RISK_REGION",
+    "T12_FLOODING_FLAG", "T13_DORMANT_BASELINE_FLAG", "T13_REACTIVATION_FLAG",
+    "ORIGINATOR_T05_SHELL_FLAG", "ORIGINATOR_T06_NOMINEE_FLAG",
+    "ORIGINATOR_T07_OPACITY_FLAG", "ORIGINATOR_T08_FLAG",
+]
+_SKLEARN_TX_NUMERIC_COLS = [
+    "AMOUNT_USD", "T02_VELOCITY_ZSCORE", "T09_SANCTIONS_MATCH_SCORE",
+    "T11_CORRIDOR_POINTS", "TRANSACTION_TYPOLOGY_POINTS",
+    "ORIGINATOR_COMPANY_TYPOLOGY_POINTS", "TOTAL_TYPOLOGY_POINTS", "EXPOSURE_FACTOR",
+]
+_SKLEARN_TX_CATEGORICAL_COLS = [
+    "CURRENCY_ORIGINAL", "ORIGINATING_COUNTRY_ID", "DESTINATION_COUNTRY_ID",
+    "BENEFICIARY_COUNTRY_ID",
+]
+# Originator company columns (joined on ORIGINATOR_COMPANY_ID == COMPANY_ID,
+# same join train_sklearn_scorer.py's load_joined() and data_store.py's
+# _load() both do), renamed ORIGINATOR_* to match feature_schema.json.
+_SKLEARN_COMPANY_SRC_COLS = [
+    "EMPLOYEE_COUNT", "ANNUAL_REVENUE_USD", "TOTAL_DECLARED_PCT", "OWNER_COUNT",
+    "PEP_ASSOCIATED", "SANCTIONS_HIT", "ADVERSE_MEDIA_FLAG", "IS_ACTIVE",
+    "KYC_RISK_RATING", "COMPANY_TYPE", "CLIENT_SEGMENT", "T08_PEP_HIT_COUNT",
+]
+
+
+class SklearnScorer(BaseScorer):
+    """Independent, offline-trained classical scorer: loads the
+    GradientBoostingRegressor/RandomForestClassifier artifacts trained by
+    ../train_sklearn_scorer.py (NOT retrained here - see that script and
+    ../sklearn_model_report.txt for the full training/evaluation writeup,
+    including the same PROXY-LABEL caveat that applies to RPTScorer's
+    context pool: OVERALL_RISK_SCORE/IS_ANOMALY are not real fraud-outcome
+    ground truth).
+
+    Unlike RPTScorer, ScoringContext alone doesn't carry enough information
+    (it's deliberately minimal - see that dataclass's docstring): the 41
+    features these artifacts were trained on (amount, velocity z-score,
+    sanctions match score, corridor points, company financials, frequency-
+    encoded country/currency codes - see ml_models/feature_schema.json)
+    require an independent join of TRANSACTION_FRAUD_FEATURES.parquet with
+    COMPANY_FRAUD_FEATURES.parquet, mirroring train_sklearn_scorer.py's
+    load_joined() / data_store.py's _load(). So, exactly like RPTScorer's
+    own `_build_context_pool`, this scorer reads that data itself (once,
+    cached at class level) rather than asking ScoringContext to carry more.
+
+    No network calls - this is local/offline and fast, so unlike RPTScorer
+    there's no fallback-on-failure: a missing/unloadable artifact raises
+    clearly at construction time, and an unknown transaction_id raises
+    clearly at score() time, rather than silently producing garbage.
+    """
+
+    model_version = "sklearn-gbr-rfc-v1"
+
+    # Class-level so the joined lookup table (indexed by TRANSACTION_ID) and
+    # loaded artifacts' derived caches are shared across instances/requests
+    # within a process, same pattern as RPTScorer._context_pool_cache.
+    _cache_lock = threading.Lock()
+    _rows_by_txn_cache: dict[int, dict[str, Any]] | None = None
+    _sorted_points_cache: list[tuple[float, int]] | None = None
+
+    def __init__(self) -> None:
+        try:
+            self._regressor = joblib.load(settings.SKLEARN_REGRESSOR_PATH)
+            self._classifier = joblib.load(settings.SKLEARN_CLASSIFIER_PATH)
+            with open(settings.SKLEARN_FEATURE_SCHEMA_PATH, "r", encoding="utf-8") as f:
+                self._feature_schema: dict[str, Any] = json.load(f)
+        except Exception as exc:  # noqa: BLE001 - re-raise as a clear, specific error
+            raise RuntimeError(
+                f"SklearnScorer: failed to load model artifacts from {settings.ML_MODELS_DIR} "
+                f"(regressor={settings.SKLEARN_REGRESSOR_PATH}, "
+                f"classifier={settings.SKLEARN_CLASSIFIER_PATH}, "
+                f"feature_schema={settings.SKLEARN_FEATURE_SCHEMA_PATH}): {exc}"
+            ) from exc
+
+        self._feature_order: list[str] = self._feature_schema["feature_order"]
+        self._bool_features: list[str] = self._feature_schema["bool_features"]
+        self._numeric_features: list[str] = self._feature_schema["numeric_features"]
+        self._categorical_features: list[str] = self._feature_schema["categorical_features_frequency_encoded"]
+        self._frequency_maps: dict[str, dict[str, float]] = self._feature_schema["frequency_maps"]
+
+        self._rows_by_txn = self._get_rows_by_txn()
+        self._sorted_points = self._get_sorted_points()
+
+    # ------------------------------------------------------------------
+    # Independent data load + join (mirrors train_sklearn_scorer.py's
+    # load_joined() / data_store.py's _load() join pattern)
+    # ------------------------------------------------------------------
+    def _get_rows_by_txn(self) -> dict[int, dict[str, Any]]:
+        if SklearnScorer._rows_by_txn_cache is not None:
+            return SklearnScorer._rows_by_txn_cache
+        with SklearnScorer._cache_lock:
+            if SklearnScorer._rows_by_txn_cache is None:
+                SklearnScorer._rows_by_txn_cache = self._build_rows_by_txn()
+        return SklearnScorer._rows_by_txn_cache
+
+    def _build_rows_by_txn(self) -> dict[int, dict[str, Any]]:
+        tx_needed_cols = list(dict.fromkeys(
+            ["TRANSACTION_ID", "ORIGINATOR_COMPANY_ID", "TOTAL_TYPOLOGY_POINTS"]
+            + _SKLEARN_TX_BOOL_COLS + _SKLEARN_TX_NUMERIC_COLS + _SKLEARN_TX_CATEGORICAL_COLS
+        ))
+        tx = pd.read_parquet(settings.TRANSACTION_FEATURES_PATH, columns=tx_needed_cols)
+        nrows = settings.MAX_ROWS
+        if nrows:
+            tx = tx.head(nrows).copy()
+
+        company_needed_cols = ["COMPANY_ID"] + _SKLEARN_COMPANY_SRC_COLS
+        companies = pd.read_parquet(settings.COMPANY_FEATURES_PATH, columns=company_needed_cols)
+        company_cols = companies.rename(
+            columns=lambda c: f"ORIGINATOR_{c}" if c != "COMPANY_ID" else c
+        )
+
+        df = tx.merge(company_cols, left_on="ORIGINATOR_COMPANY_ID", right_on="COMPANY_ID", how="left")
+        df = df.drop(columns="COMPANY_ID")
+
+        rows_by_txn: dict[int, dict[str, Any]] = {}
+        records = df.to_dict(orient="records")
+        for rec in records:
+            rows_by_txn[int(rec["TRANSACTION_ID"])] = rec
+        return rows_by_txn
+
+    def _get_sorted_points(self) -> list[tuple[float, int]]:
+        if SklearnScorer._sorted_points_cache is not None:
+            return SklearnScorer._sorted_points_cache
+        with SklearnScorer._cache_lock:
+            if SklearnScorer._sorted_points_cache is None:
+                pts = sorted(
+                    (float(row.get("TOTAL_TYPOLOGY_POINTS") or 0.0), tid)
+                    for tid, row in self._rows_by_txn.items()
+                )
+                SklearnScorer._sorted_points_cache = pts
+        return SklearnScorer._sorted_points_cache
+
+    # ------------------------------------------------------------------
+    # Feature vector construction (feature_schema.json's feature_order +
+    # frequency_maps, exactly as train_sklearn_scorer.py's
+    # build_feature_matrix() does for a single row)
+    # ------------------------------------------------------------------
+    def _build_feature_vector(self, row: dict[str, Any]) -> pd.DataFrame:
+        values: dict[str, float] = {}
+        for c in self._bool_features:
+            values[c] = int(bool(row.get(c) or False))
+        for c in self._numeric_features:
+            v = row.get(c)
+            try:
+                fv = float(v)
+                values[c] = 0.0 if np.isnan(fv) else fv
+            except (TypeError, ValueError):
+                values[c] = 0.0
+        for c in self._categorical_features:
+            col_key = f"{c}_FREQ"
+            freq_map = self._frequency_maps.get(c, {})
+            values[col_key] = float(freq_map.get(str(row.get(c)), 0.0))
+        return pd.DataFrame([values], columns=self._feature_order)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+    def score(self, ctx: ScoringContext) -> dict[str, Any]:
+        row = self._rows_by_txn.get(ctx.transaction_id)
+        if row is None:
+            raise ValueError(
+                f"SklearnScorer: transaction_id {ctx.transaction_id} not found in the joined "
+                "TRANSACTION_FRAUD_FEATURES/COMPANY_FRAUD_FEATURES lookup table."
+            )
+
+        X = self._build_feature_vector(row)
+        overall = float(self._regressor.predict(X)[0])
+        overall = max(0.0, min(100.0, overall))
+        # Classifier's own predict_proba is a genuine model-native confidence
+        # signal (unlike a fabricated one); >=0.5 matches sklearn's own
+        # .predict() default decision threshold and the threshold
+        # train_sklearn_scorer.py's evaluation used for precision/recall/F1.
+        anomaly_proba = float(self._classifier.predict_proba(X)[0, 1])
+        is_anomaly = anomaly_proba >= 0.5
+
+        tier = str(scoring_math.risk_tier(overall))
+        triggered = [s for s in ctx.typology_signals if s["triggered"]]
+        anomaly_type = _infer_anomaly_type(triggered) if is_anomaly else None
+
+        points_by_id = {s["id"]: s["points"] for s in ctx.typology_signals}
+        component_scores: dict[str, float] = {}
+        for comp_name, typ_ids in CATEGORY_COMPONENT_MAP.items():
+            base_points = sum(points_by_id.get(t, 0) for t in typ_ids)
+            weight = base_points / ctx.total_typology_points if ctx.total_typology_points > 0 else 0.0
+            component = overall * (0.4 + 0.6 * weight)
+            component_scores[comp_name] = round(max(0.0, min(100.0, component)), 1)
+
+        risk = {
+            "overall_risk_score": round(overall, 1),
+            "risk_tier": tier,
+            "model_confidence": round(anomaly_proba, 3),
+            "is_anomaly": bool(is_anomaly),
+            "anomaly_type": anomaly_type,
+            "component_scores": component_scores,
+        }
+
+        explanation = self._build_explanation(ctx, risk, triggered)
+        return {"risk": risk, "explanation": explanation}
+
+    # ------------------------------------------------------------------
+    # Explanation
+    # ------------------------------------------------------------------
+    def _nearest_by_typology_points(
+        self, transaction_id: int, total_points: float, k: int = 3
+    ) -> list[dict[str, Any]]:
+        """Cheap, honest stand-in for RPT's `top_relevant_context_rows`: a
+        tree ensemble has no natural per-row "nearest historical example"
+        concept, so this is an approximate nearest-neighbor lookup by
+        TOTAL_TYPOLOGY_POINTS proximity over the already-loaded joined data
+        (not a real resolved-case match) - `outcome` is always null, same
+        honesty reasoning RPTScorer's own context rows use."""
+        pts = self._sorted_points
+        if not pts:
+            return []
+        keys = [p[0] for p in pts]
+        idx = bisect.bisect_left(keys, float(total_points))
+        n = len(pts)
+        lo, hi = idx - 1, idx
+        candidates: list[tuple[float, int]] = []
+        while len(candidates) < k + 1 and (lo >= 0 or hi < n):
+            if lo >= 0 and (hi >= n or (float(total_points) - pts[lo][0]) <= (pts[hi][0] - float(total_points))):
+                candidates.append(pts[lo])
+                lo -= 1
+            elif hi < n:
+                candidates.append(pts[hi])
+                hi += 1
+            else:
+                break
+
+        rows: list[dict[str, Any]] = []
+        for pt_val, tid in candidates:
+            if tid == transaction_id:
+                continue
+            diff = abs(pt_val - float(total_points))
+            similarity = max(0.0, min(1.0, 1.0 - diff / 100.0))
+            rows.append({"reference_id": f"TXN-{tid}", "similarity_score": round(similarity, 2), "outcome": None})
+            if len(rows) >= k:
+                break
+        return rows
+
+    def _build_explanation(
+        self, ctx: ScoringContext, risk: dict[str, Any], triggered: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        # GLOBAL (not per-prediction) feature importance - scikit-learn tree
+        # ensembles don't give cheap per-row attribution the way RPT's API
+        # does (that would need something like SHAP, out of scope here).
+        # Honestly labeled as global in the class docstring/report, not
+        # claimed to be per-row.
+        importances = getattr(self._regressor, "feature_importances_", None)
+        top_column_scores: list[dict[str, Any]] = []
+        if importances is not None:
+            pairs = sorted(zip(self._feature_order, importances), key=lambda kv: kv[1], reverse=True)[:4]
+            top_column_scores = [
+                {"column": col, "contribution_score": round(float(imp), 3)} for col, imp in pairs
+            ]
+
+        top_relevant_context_rows = self._nearest_by_typology_points(ctx.transaction_id, ctx.total_typology_points)
+
+        if triggered:
+            names = ", ".join(f"{s['id']} ({s['name']})" for s in triggered[:4])
+            narrative_text = (
+                f"Flagged for {names}; combined typology strength reached "
+                f"{ctx.total_typology_points} points (exposure factor {ctx.exposure_factor}). "
+                f"scikit-learn model estimate: overall risk {risk['overall_risk_score']} "
+                f"({risk['risk_tier']}, confidence {risk['model_confidence']})."
+            )
+        else:
+            narrative_text = (
+                f"No deterministic typology signals triggered. scikit-learn model estimate: "
                 f"overall risk {risk['overall_risk_score']} ({risk['risk_tier']}, confidence "
                 f"{risk['model_confidence']})."
             )

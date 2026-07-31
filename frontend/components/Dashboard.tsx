@@ -11,6 +11,7 @@ import { RiskTable } from "./RiskTable";
 import { Filters } from "./Filters";
 import { DataSourceStatus } from "./DataSourceStatus";
 import { ThemeToggle } from "./ThemeToggle";
+import { ModelPicker } from "./ModelPicker";
 import { DetailDrawer } from "./DetailDrawer";
 import styles from "./Dashboard.module.css";
 
@@ -38,7 +39,9 @@ function sortAssessments(list: RiskAssessment[], sortKey: FilterState["sortKey"]
 }
 
 export function Dashboard() {
-  const { assessments, status, dataSource, eventCount, recordReviewDecision } = useRiskStream();
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const { assessments, status, dataSource, eventCount, recordReviewDecision } =
+    useRiskStream(selectedModel);
   const [filters, setFilters] = useState<FilterState>(emptyFilterState);
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -84,6 +87,11 @@ export function Dashboard() {
           <p className={styles.subtitle}>AML / fraud-triage - severity-ranked transaction review</p>
         </div>
         <div className={styles.headerRight}>
+          <ModelPicker
+            value={selectedModel}
+            onChange={setSelectedModel}
+            disabled={dataSource === "mock"}
+          />
           <DataSourceStatus dataSource={dataSource} status={status} eventCount={eventCount} />
           <ThemeToggle />
         </div>
@@ -114,6 +122,8 @@ export function Dashboard() {
 
       <DetailDrawer
         assessment={selected}
+        model={selectedModel}
+        dataSource={dataSource}
         onClose={() => selectAssessment(null)}
         onRecordReview={recordReviewDecision}
       />

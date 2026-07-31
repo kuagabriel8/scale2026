@@ -61,6 +61,11 @@
   font-weight: 700;
 }
 
+.refreshNote {
+  color: var(--ink-secondary);
+  font-style: italic;
+}
+
 .narrative {
   margin: 0;
   font-size: 13px;

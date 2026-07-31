@@ -4,3 +4,5 @@ python-dotenv
 hana-ml
 pyarrow
 rapidfuzz
+scikit-learn
+joblib

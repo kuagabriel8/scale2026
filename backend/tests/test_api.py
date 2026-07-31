@@ -115,6 +115,50 @@ def test_websocket_receives_assessment_created(client):
         validate_assessment(data["assessment"])
 
 
+def test_list_risk_assessments_with_sklearn_model(client):
+    resp = client.get("/risk-assessments?page=1&page_size=5&model=sklearn")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["items"]) == 5
+    for item in body["items"]:
+        validate_assessment(item)
+        assert item["model_version"] == "sklearn-gbr-rfc-v1"
+
+
+def test_get_single_assessment_with_rpt_model_falls_back_to_dummy(client):
+    """No live network/credentials in the test env, so RPTScorer's predict
+    call fails and it falls back to its internal DummyScorer - this test
+    only checks the request is routed to RPTScorer and still returns a
+    schema-valid 200, not that it hit the live SAP-RPT endpoint."""
+    listed = client.get("/risk-assessments?page_size=1").json()["items"][0]
+    tid = listed["transaction_id"]
+    resp = client.get(f"/risk-assessments/{tid}?model=rpt")
+    assert resp.status_code == 200
+    body = resp.json()
+    validate_assessment(body)
+    assert body["transaction_id"] == tid
+
+
+def test_invalid_model_query_param_returns_400(client):
+    resp = client.get("/risk-assessments?model=nonsense")
+    assert resp.status_code == 400
+
+    listed = client.get("/risk-assessments?page_size=1").json()["items"][0]
+    tid = listed["transaction_id"]
+    resp2 = client.get(f"/risk-assessments/{tid}?model=nonsense")
+    assert resp2.status_code == 400
+
+
+def test_list_models_endpoint(client):
+    resp = client.get("/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = {m["id"] for m in body}
+    assert ids == {"rpt", "sklearn", "dummy"}
+    for m in body:
+        assert "label" in m and "description" in m
+
+
 def test_websocket_review_status_changed_broadcast(client):
     listed = client.get("/risk-assessments?page_size=1").json()["items"][0]
     tid = listed["transaction_id"]

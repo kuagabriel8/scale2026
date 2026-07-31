@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..dependencies import get_connection_manager, get_data_store
+from .risk_assessments import _VALID_MODELS
 
 router = APIRouter(tags=["streaming"])
 logger = logging.getLogger("sightline.ws")
@@ -31,11 +32,20 @@ async def risk_stream(websocket: WebSocket) -> None:
             data = await websocket.receive_json()
             if isinstance(data, dict) and data.get("type") == "get":
                 tid = data.get("transaction_id")
+                # Optional per-request model choice, same set of names as
+                # the REST GET /risk-assessments[/{id}]?model= query param
+                # (see app/routers/risk_assessments.py's _VALID_MODELS).
+                model = data.get("model")
+                if model is not None and model not in _VALID_MODELS:
+                    await websocket.send_json(
+                        {"type": "error", "detail": f"Unknown model {model!r}; available: {sorted(_VALID_MODELS)}"}
+                    )
+                    continue
                 # Offload: get_assessment() can invoke a blocking RPTScorer
                 # HTTP call, which must not block the event loop (and thus
                 # every other WebSocket/REST client) while it runs.
                 assessment = (
-                    await asyncio.to_thread(data_store.get_assessment, int(tid))
+                    await asyncio.to_thread(data_store.get_assessment, int(tid), model)
                     if tid is not None
                     else None
                 )

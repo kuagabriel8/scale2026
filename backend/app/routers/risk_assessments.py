@@ -20,6 +20,25 @@ RiskTier = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 ReviewStatus = Literal["PENDING", "IN_REVIEW", "ESCALATED", "CLEARED", "SAR_FILED"]
 SortField = Literal["severity", "overall_risk_score", "typology_strength_points", "transaction_id"]
 
+# Deliberately a plain `str` (not a pydantic Literal) so an invalid value
+# comes back as a clean 400 raised below, rather than FastAPI/pydantic's
+# default 422 for a failed query-param Literal validation.
+_VALID_MODELS = {"rpt", "sklearn", "dummy"}
+_MODEL_QUERY_DESCRIPTION = (
+    "Which scoring model produces risk/explanation for this request: one of "
+    "'rpt' | 'sklearn' | 'dummy' (see GET /models for the full list + "
+    "descriptions). Omit to use the server's configured default (settings.SCORER)."
+)
+
+
+def _validate_model(model: str | None) -> str | None:
+    if model is not None and model not in _VALID_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model {model!r}; available: {sorted(_VALID_MODELS)}",
+        )
+    return model
+
 
 @router.get("", response_model=PaginatedAssessments)
 def list_risk_assessments(
@@ -30,8 +49,10 @@ def list_risk_assessments(
     risk_tier: RiskTier | None = Query(None),
     category: TypologyCategory | None = Query(None, description="Filter to transactions with >=1 triggered typology signal in this category"),
     review_status: ReviewStatus | None = Query(None),
+    model: str | None = Query(None, description=_MODEL_QUERY_DESCRIPTION),
     data_store: DataStore = Depends(get_data_store),
 ) -> PaginatedAssessments:
+    model = _validate_model(model)
     items, total = data_store.list_assessments(
         page=page,
         page_size=page_size,
@@ -40,6 +61,7 @@ def list_risk_assessments(
         risk_tier=risk_tier,
         category=category,
         review_status=review_status,
+        model=model,
     )
     return PaginatedAssessments(
         items=[RiskAssessment.model_validate(a) for a in items],
@@ -51,8 +73,13 @@ def list_risk_assessments(
 
 
 @router.get("/{transaction_id}", response_model=RiskAssessment)
-def get_risk_assessment(transaction_id: int, data_store: DataStore = Depends(get_data_store)) -> RiskAssessment:
-    assessment = data_store.get_assessment(transaction_id)
+def get_risk_assessment(
+    transaction_id: int,
+    model: str | None = Query(None, description=_MODEL_QUERY_DESCRIPTION),
+    data_store: DataStore = Depends(get_data_store),
+) -> RiskAssessment:
+    model = _validate_model(model)
+    assessment = data_store.get_assessment(transaction_id, model=model)
     if assessment is None:
         raise HTTPException(status_code=404, detail=f"transaction_id {transaction_id} not found")
     return RiskAssessment.model_validate(assessment)

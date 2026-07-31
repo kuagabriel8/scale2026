@@ -20,6 +20,16 @@ export interface ListAssessmentsParams {
   risk_tier?: RiskTier;
   category?: TypologyCategory;
   review_status?: ReviewStatus;
+  /** Optional scorer id from GET /models (e.g. "rpt" | "sklearn" | "dummy").
+   * Omitting it lets the backend use its configured default. */
+  model?: string;
+}
+
+/** One entry from GET /models. */
+export interface ModelInfo {
+  id: string;
+  label: string;
+  description: string;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -47,8 +57,17 @@ export function listRiskAssessments(
   return apiFetch<PaginatedAssessments>(`/risk-assessments${qs ? `?${qs}` : ""}`);
 }
 
-export function getRiskAssessment(transactionId: number): Promise<RiskAssessment> {
-  return apiFetch<RiskAssessment>(`/risk-assessments/${transactionId}`);
+export function getRiskAssessment(
+  transactionId: number,
+  model?: string
+): Promise<RiskAssessment> {
+  const qs = model ? `?${new URLSearchParams({ model }).toString()}` : "";
+  return apiFetch<RiskAssessment>(`/risk-assessments/${transactionId}${qs}`);
+}
+
+/** Fetch the list of available scorer models the backend can select between. */
+export function getModels(): Promise<ModelInfo[]> {
+  return apiFetch<ModelInfo[]>("/models");
 }
 
 export function updateReviewStatus(

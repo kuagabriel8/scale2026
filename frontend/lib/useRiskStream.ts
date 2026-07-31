@@ -61,7 +61,7 @@ function applyEvent(
   return next;
 }
 
-export function useRiskStream(): RiskStreamState {
+export function useRiskStream(model: string | null = null): RiskStreamState {
   const [byId, setById] = useState<Map<number, RiskAssessment>>(new Map());
   const [status, setStatus] = useState<ConnectionStatus>(
     DATA_SOURCE === "mock" ? "mock" : "connecting"
@@ -70,6 +70,12 @@ export function useRiskStream(): RiskStreamState {
   const [eventCount, setEventCount] = useState(0);
   const lastSequenceRef = useRef<number>(-1);
   const wsRef = useRef<WebSocket | null>(null);
+  // True only for the very first REST seed fetch (on mount, before the model
+  // picker may have even resolved a selection) - that one must not clobber
+  // rows already delivered by the WS stream. Every subsequent fetch is a
+  // deliberate re-score triggered by the analyst changing the model picker,
+  // so it should overwrite so the change is actually visible.
+  const isFirstSeedRef = useRef(true);
 
   const ingest = useCallback((event: RiskAssessmentStreamEvent) => {
     // Dedupe / ignore out-of-order per schema guidance: sequence is
@@ -111,28 +117,37 @@ export function useRiskStream(): RiskStreamState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- Live mode: initial REST seed ----
+  // ---- Live mode: REST seed (initial mount, and again whenever the
+  // analyst changes the selected scorer model via the model picker) ----
   useEffect(() => {
     if (DATA_SOURCE !== "live") return;
     let cancelled = false;
+    const isFirst = isFirstSeedRef.current;
+    isFirstSeedRef.current = false;
 
-    listRiskAssessments({ page_size: LIVE_SEED_PAGE_SIZE, sort: "severity" })
+    listRiskAssessments({
+      page_size: LIVE_SEED_PAGE_SIZE,
+      sort: "severity",
+      model: model ?? undefined,
+    })
       .then((res) => {
         if (cancelled) return;
         setById((prev) => {
-          // Don't clobber anything already ingested from the WS stream
-          // (which may connect and deliver events before this resolves).
           const next = new Map(prev);
           for (const assessment of res.items) {
-            if (!next.has(assessment.transaction_id)) {
-              next.set(assessment.transaction_id, assessment);
+            if (isFirst && next.has(assessment.transaction_id)) {
+              // Initial mount only: don't clobber anything already ingested
+              // from the WS stream (which may connect and deliver events
+              // before this resolves).
+              continue;
             }
+            next.set(assessment.transaction_id, assessment);
           }
           return next;
         });
       })
       .catch(() => {
-        // Backend not running / network error - leave the dashboard empty
+        // Backend not running / network error - leave the dashboard as-is
         // and let the WS connection-status UI reflect the failure instead
         // of crashing here.
       });
@@ -140,7 +155,7 @@ export function useRiskStream(): RiskStreamState {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [model]);
 
   // ---- Live mode: WebSocket stream ----
   useEffect(() => {

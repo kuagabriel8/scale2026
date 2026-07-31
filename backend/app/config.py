@@ -40,6 +40,14 @@ class Settings:
     COUNTRIES_PATH: Path = CLEANED_DATA_DIR / "COUNTRIES.parquet"
     BASELINES_PATH: Path = CLEANED_DATA_DIR / "TRANSACTION_BASELINES.parquet"
 
+    # --- Offline-trained scikit-learn scorer artifacts (see
+    # ../train_sklearn_scorer.py / ../sklearn_model_report.txt). Not
+    # retrained here - app/scorer.py's SklearnScorer just loads these. ---
+    ML_MODELS_DIR: Path = Path(os.getenv("ML_MODELS_DIR", REPO_ROOT / "ml_models"))
+    SKLEARN_REGRESSOR_PATH: Path = ML_MODELS_DIR / "sklearn_risk_regressor.joblib"
+    SKLEARN_CLASSIFIER_PATH: Path = ML_MODELS_DIR / "sklearn_anomaly_classifier.joblib"
+    SKLEARN_FEATURE_SCHEMA_PATH: Path = ML_MODELS_DIR / "feature_schema.json"
+
     TYPOLOGY_DEFS_PATH: Path = Path(os.getenv("TYPOLOGY_DEFS_PATH", REPO_ROOT / "topfraudandtables.json"))
     RISK_ASSESSMENT_SCHEMA_PATH: Path = Path(
         os.getenv("RISK_ASSESSMENT_SCHEMA_PATH", REPO_ROOT / "risk_assessment_schema.json")
@@ -78,14 +86,25 @@ class Settings:
     VALIDATE_RESPONSES: bool = _bool("VALIDATE_RESPONSES", True)
 
     # --- ML/RPT scoring layer selection ---
-    # "rpt"   -> RPTScorer, real SAP-RPT tabular foundation model calls.
-    # "dummy" -> DummyScorer, deterministic mock (used by the test suite and
-    #            as an explicit opt-out / offline-dev fallback).
+    # This picks the *default* scorer only - the one used for the shared
+    # background stream simulator (no per-viewer concept there) and for any
+    # request that doesn't pass an explicit `?model=` query param. All three
+    # scorers are always constructed (see app/main.py's lifespan) and a
+    # caller can pick per-request regardless of this setting - see
+    # DataStore.list_assessments/get_assessment's `model` param and
+    # GET /models for the full set of choices.
+    # "rpt"     -> RPTScorer, real SAP-RPT tabular foundation model calls.
+    # "sklearn" -> SklearnScorer, offline-trained scikit-learn GBR+RF models
+    #              (see ../train_sklearn_scorer.py).
+    # "dummy"   -> DummyScorer, deterministic mock (used by the test suite
+    #              and as an explicit opt-out / offline-dev fallback).
     SCORER: str = os.getenv("SCORER", "rpt").strip().lower()
 
-    MODEL_VERSION: str = os.getenv("MODEL_VERSION") or (
-        "sap-rpt-1.5-large" if SCORER == "rpt" else "dummy-mock-v0"
-    )
+    # Optional override for the *default* scorer's reported model_version
+    # (e.g. pinning a specific label in local dev). When unset, each scorer
+    # reports its own descriptive default (see app/scorer.py's
+    # RPTScorer/SklearnScorer/DummyScorer.model_version class attributes).
+    MODEL_VERSION: str | None = os.getenv("MODEL_VERSION") or None
 
     # --- SAP AI Core / RPT deployment (see repo-root .env) ---
     AICORE_CLIENT_ID: str = os.getenv("AICORE_CLIENT_ID", "")

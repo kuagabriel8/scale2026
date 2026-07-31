@@ -50,8 +50,20 @@ def _utcnow_iso() -> str:
 
 
 class DataStore:
-    def __init__(self, scorer: BaseScorer):
-        self.scorer = scorer
+    def __init__(self, scorers: dict[str, BaseScorer], default_scorer: str):
+        """`scorers`: every available ML/RPT scoring layer implementation,
+        keyed by the name a caller passes as `?model=`/`{"model": ...}`
+        (e.g. "rpt", "sklearn", "dummy" - see app/main.py's lifespan).
+        `default_scorer`: which key to use when a caller doesn't pass an
+        explicit choice (from settings.SCORER) - this is also always what
+        the shared background stream simulator uses via bump_rescore(),
+        since a broadcast stream has no per-viewer model concept."""
+        self.scorers = scorers
+        if default_scorer not in scorers:
+            raise ValueError(
+                f"DataStore: default_scorer {default_scorer!r} not in available scorers {sorted(scorers)}"
+            )
+        self.default_scorer_name = default_scorer
         self.typology_defs = load_typology_defs()
         self.typology_ids = ordered_typology_ids()
 
@@ -178,6 +190,22 @@ class DataStore:
         )
 
     # ------------------------------------------------------------------
+    # Scorer resolution
+    # ------------------------------------------------------------------
+    def resolve_scorer(self, model: str | None) -> BaseScorer:
+        """Looks up a named scorer (e.g. "rpt"/"sklearn"/"dummy"), or the
+        configured default when `model` is None/omitted. Raises KeyError on
+        an unknown name - callers (routers) are expected to translate that
+        into a clean 4xx rather than a 500."""
+        name = model or self.default_scorer_name
+        try:
+            return self.scorers[name]
+        except KeyError:
+            raise KeyError(
+                f"Unknown model {name!r}; available: {sorted(self.scorers)}"
+            ) from None
+
+    # ------------------------------------------------------------------
     # Public read API
     # ------------------------------------------------------------------
     def list_assessments(
@@ -189,7 +217,9 @@ class DataStore:
         risk_tier: str | None = None,
         category: str | None = None,
         review_status: str | None = None,
+        model: str | None = None,
     ) -> tuple[list[dict], int]:
+        scorer = self.resolve_scorer(model)
         board = self._scoreboard()
 
         if risk_tier:
@@ -219,14 +249,15 @@ class DataStore:
         end = start + page_size
         page_positions = board["pos"].to_numpy()[start:end]
 
-        items = [self._build_assessment_at(pos) for pos in page_positions]
+        items = [self._build_assessment_at(pos, scorer) for pos in page_positions]
         return items, total
 
-    def get_assessment(self, transaction_id: int) -> dict | None:
+    def get_assessment(self, transaction_id: int, model: str | None = None) -> dict | None:
         pos = self._pos_by_id.get(transaction_id)
         if pos is None:
             return None
-        return self._build_assessment_at(pos)
+        scorer = self.resolve_scorer(model)
+        return self._build_assessment_at(pos, scorer)
 
     def transaction_ids_in_stream_order(self) -> list[int]:
         return [int(self._transaction_ids[p]) for p in self._stream_order_positions]
@@ -235,14 +266,15 @@ class DataStore:
         """Simulates a re-score (e.g. a later transaction pushed this one
         into a structuring window): increments this transaction's
         update_count, which perturbs the deterministic-but-varied ML score
-        via scoring_math, and refreshes scored_at."""
+        via scoring_math, and refreshes scored_at. Always uses the default
+        scorer (no per-viewer concept for the shared broadcast stream)."""
         pos = self._pos_by_id.get(transaction_id)
         if pos is None:
             return None
         with self._lock:
             self._update_counts[pos] += 1
             self._scored_at[pos] = _utcnow_iso()
-        return self._build_assessment_at(pos)
+        return self._build_assessment_at(pos, self.scorers[self.default_scorer_name])
 
     def update_review(self, transaction_id: int, review_status: str, reviewed_by: str | None) -> dict | None:
         pos = self._pos_by_id.get(transaction_id)
@@ -251,7 +283,7 @@ class DataStore:
         with self._lock:
             self._review_status[pos] = review_status
             self._reviewed_by[pos] = reviewed_by
-        return self._build_assessment_at(pos)
+        return self._build_assessment_at(pos, self.scorers[self.default_scorer_name])
 
     # ------------------------------------------------------------------
     # Assessment construction (the expensive, lazily-built nested object)
@@ -276,7 +308,7 @@ class DataStore:
             )
         return signals
 
-    def _build_assessment_at(self, pos: int) -> dict:
+    def _build_assessment_at(self, pos: int, scorer: BaseScorer) -> dict:
         row = self.df.iloc[int(pos)].to_dict()
         transaction_id = int(row["TRANSACTION_ID"])
 
@@ -293,7 +325,7 @@ class DataStore:
             typology_signals=typology_signals,
             update_count=update_count,
         )
-        scored = self.scorer.score(ctx)
+        scored = scorer.score(ctx)
 
         governance = {
             "requires_human_review": True,
@@ -301,11 +333,19 @@ class DataStore:
             "reviewed_by": self._reviewed_by[pos],
         }
 
+        # settings.MODEL_VERSION is an optional override for whichever
+        # scorer is the process-wide default; every other named scorer
+        # reports its own descriptive model_version (see BaseScorer
+        # subclasses in app/scorer.py).
+        model_version = scorer.model_version
+        if settings.MODEL_VERSION and scorer is self.scorers.get(self.default_scorer_name):
+            model_version = settings.MODEL_VERSION
+
         assessment = {
             "transaction_id": transaction_id,
             "transaction_uuid": row["TRANSACTION_UUID"],
             "scored_at": self._scored_at[pos],
-            "model_version": settings.MODEL_VERSION,
+            "model_version": model_version,
             "risk": scored["risk"],
             "typology_signals": typology_signals,
             "exposure": exposure,

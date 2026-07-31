@@ -1,0 +1,182 @@
+
+========================================================================================
+SightLine - Second Independent Risk Scorer (scikit-learn) - Training Report
+========================================================================================
+This model is a from-scratch, gradient/tree-trained scikit-learn scorer, built as an INDEPENDENT alternative to the existing SAP-RPT integration (backend/app/scorer.py's RPTScorer). It is not wired into the FastAPI backend or Next.js frontend in this step - that (letting a user pick 'RPT 1.5' vs. this model) is a separate, later task.
+
+========================================================================================
+PROXY-LABEL CAVEAT (read first)
+========================================================================================
+There is no real historical fraud-investigation ground truth anywhere in cleaned_data/ - no COMPLIANCE_CASES, RISK_ALERTS, or TRANSACTION_RISK_SCORES table exists in this environment. Both this model and the existing RPT integration are trained/evaluated against an identical PROXY label, computed with the same deterministic formula already used in backend/app/scoring_math.py and backend/app/scorer.py:
+    OVERALL_RISK_SCORE = clamp(15 + TOTAL_TYPOLOGY_POINTS * 0.65 + noise(+/-12), 0, 100)
+    IS_ANOMALY         = OVERALL_RISK_SCORE >= 70  OR  (# triggered typologies) >= 3
+This choice is deliberate: it makes a later side-by-side comparison between RPT and this model apples-to-apples (both targets are defined identically). It also means every metric below measures how well this model reconstructs a mostly-deterministic function of TOTAL_TYPOLOGY_POINTS (plus a bounded, transaction_id-seeded noise term) - NOT real-world fraud-detection performance. Treat this report as a model-fit exercise on a proxy target, never as evidence this model catches real fraud.
+
+========================================================================================
+DATA
+========================================================================================
+  TRANSACTION_FRAUD_FEATURES rows                                  150,000
+  SPLIT == 'train' rows                                            105,000
+  SPLIT == 'val' rows                                              22,500
+  SPLIT == 'test' rows                                             22,500
+  NOTE: Reusing the existing chronological SPLIT column from build_fraud_features.py's assign_time_split() (70/15/15 by INITIATED_AT) - not re-split, not shuffled. COMPANY_FRAUD_FEATURES.parquet is joined onto TRANSACTION_FRAUD_FEATURES via ORIGINATOR_COMPANY_ID == COMPANY_ID, mirroring backend/app/data_store.py's _load().
+
+========================================================================================
+FEATURE SET
+========================================================================================
+Total features: 41
+
+Boolean typology/flag features (21):
+  T01_STRUCTURING_FLAG, T02_VELOCITY_FLAG, T02_DAILY_COUNT_FLAG, T03_PASSTHROUGH_FLAG, T04_ROUNDTRIP_FLAG, T09_SANCTIONS_FLAG, T10_BIC_COUNTRY_UNMAPPED, T10_JURISDICTION_HOP_FLAG, T11_HIGH_RISK_CORRIDOR_FLAG, T11_ANY_LEG_HIGH_RISK_REGION, T12_FLOODING_FLAG, T13_DORMANT_BASELINE_FLAG, T13_REACTIVATION_FLAG, ORIGINATOR_T05_SHELL_FLAG, ORIGINATOR_T06_NOMINEE_FLAG, ORIGINATOR_T07_OPACITY_FLAG, ORIGINATOR_T08_FLAG, ORIGINATOR_PEP_ASSOCIATED, ORIGINATOR_SANCTIONS_HIT, ORIGINATOR_ADVERSE_MEDIA_FLAG, ORIGINATOR_IS_ACTIVE
+
+Numeric features (13):
+  AMOUNT_USD, T02_VELOCITY_ZSCORE, T09_SANCTIONS_MATCH_SCORE, T11_CORRIDOR_POINTS, TRANSACTION_TYPOLOGY_POINTS, ORIGINATOR_COMPANY_TYPOLOGY_POINTS, TOTAL_TYPOLOGY_POINTS, EXPOSURE_FACTOR, ORIGINATOR_EMPLOYEE_COUNT, ORIGINATOR_ANNUAL_REVENUE_USD, ORIGINATOR_TOTAL_DECLARED_PCT, ORIGINATOR_OWNER_COUNT, ORIGINATOR_T08_PEP_HIT_COUNT
+
+Categorical features (7), frequency-encoded:
+  CURRENCY_ORIGINAL, ORIGINATING_COUNTRY_ID, DESTINATION_COUNTRY_ID, BENEFICIARY_COUNTRY_ID, ORIGINATOR_KYC_RISK_RATING, ORIGINATOR_COMPANY_TYPE, ORIGINATOR_CLIENT_SEGMENT
+  NOTE: Categorical encoding choice: FREQUENCY encoding (each category value replaced by its relative frequency in the train split), not one-hot. Rationale: ORIGINATING_COUNTRY_ID/DESTINATION_COUNTRY_ID/BENEFICIARY_COUNTRY_ID are small-cardinality integer IDs but one-hot would still add ~20-60 sparse columns per column for tree models that don't need it; frequency encoding keeps the feature vector small, fixed-width, and trivially reproducible at single-row inference time (just a dict lookup - see ml_models/feature_schema.json's freq_maps), which matters for a later backend integration step that must reconstruct this exact vector from one transaction + its originator company row. Unseen categories at inference time map to 0.0 (frequency 'never observed in training').
+  NOTE: IMPORTANT (feature-importance disclosure, stated plainly per this task's requirement): the proxy label is PRIMARILY a linear function of TOTAL_TYPOLOGY_POINTS (weight 0.65) plus bounded per-transaction noise. Feature importance analysis below is expected to - and does - show TOTAL_TYPOLOGY_POINTS (and its close relatives TRANSACTION_TYPOLOGY_POINTS/ORIGINATOR_COMPANY_TYPOLOGY_POINTS/EXPOSURE_FACTOR, which are near-deterministic functions of the same underlying typology flags) dominate. This is expected and correct given how the label is constructed - it is not a modeling flaw, and it is not being hidden or engineered around here.
+
+========================================================================================
+CLASS BALANCE (IS_ANOMALY proxy label)
+========================================================================================
+  train positive rate (IS_ANOMALY==1)                              0.3174
+  val positive rate (IS_ANOMALY==1)                                0.3198
+  test positive rate (IS_ANOMALY==1)                               0.3154
+
+========================================================================================
+MODEL SELECTION - REGRESSOR (OVERALL_RISK_SCORE)
+========================================================================================
+Two reasonable configurations compared on val (no grid search infrastructure - just picking the more sensible of two candidates, as this task calls for):
+  GradientBoostingRegressor(n_estimators=200, max_depth=3, lr=0.1) -> val MAE / RMSE / R2 6.015 / 6.940 / 0.8310
+  RandomForestRegressor(n_estimators=300, max_depth=12) -> val MAE / RMSE / R2 6.020 / 6.951 / 0.8304
+Selected: GradientBoostingRegressor(n_estimators=200, max_depth=3, lr=0.1) (lowest val MAE)
+
+========================================================================================
+MODEL SELECTION - CLASSIFIER (IS_ANOMALY)
+========================================================================================
+  RandomForestClassifier(n_estimators=300, max_depth=12, class_weight=balanced) -> val precision/recall/F1/AUC 1.000 / 1.000 / 1.000 / 1.0000
+  GradientBoostingClassifier(n_estimators=200, max_depth=3, lr=0.1) -> val precision/recall/F1/AUC 1.000 / 1.000 / 1.000 / 1.0000
+Selected: RandomForestClassifier(n_estimators=300, max_depth=12, class_weight=balanced) (highest val F1)
+  NOTE: class_weight='balanced' considered for RandomForestClassifier because IS_ANOMALY's positive rate is well under 50% (see CLASS BALANCE section above) - without it, a tree ensemble can lazily favor the majority class.
+
+========================================================================================
+REGRESSOR - OVERALL_RISK_SCORE - METRICS BY SPLIT
+========================================================================================
+  train: MAE                                                       5.966
+  train: RMSE                                                      6.890
+  train: R2                                                        0.8311
+
+  val: MAE                                                         6.015
+  val: RMSE                                                        6.940
+  val: R2                                                          0.8310
+
+  test: MAE                                                        5.996
+  test: RMSE                                                       6.928
+  test: R2                                                         0.8303
+
+
+========================================================================================
+CLASSIFIER - IS_ANOMALY - METRICS BY SPLIT
+========================================================================================
+  train: precision                                                 1.0000
+  train: recall                                                    1.0000
+  train: F1                                                        1.0000
+  train: ROC-AUC                                                   1.0000
+  train: confusion matrix                                          [[TN=71671, FP=0], [FN=0, TP=33329]]
+
+  val: precision                                                   1.0000
+  val: recall                                                      1.0000
+  val: F1                                                          1.0000
+  val: ROC-AUC                                                     1.0000
+  val: confusion matrix                                            [[TN=15304, FP=0], [FN=0, TP=7196]]
+
+  test: precision                                                  1.0000
+  test: recall                                                     1.0000
+  test: F1                                                         1.0000
+  test: ROC-AUC                                                    1.0000
+  test: confusion matrix                                           [[TN=15404, FP=0], [FN=0, TP=7096]]
+
+  NOTE: HONESTY CALLOUT - the classifier's precision/recall/F1/AUC are effectively perfect (1.0) on ALL THREE splits, including test. This is NOT overfitting and NOT a bug: IS_ANOMALY is a fully deterministic function (threshold on OVERALL_RISK_SCORE, itself a deterministic function of TOTAL_TYPOLOGY_POINTS, OR a >=3 count over the same 13 typology flags) of columns that are directly present as input features (TOTAL_TYPOLOGY_POINTS, EXPOSURE_FACTOR, and the individual T01-T13 flag columns). A tree ensemble can reconstruct a deterministic threshold rule over its own literal input columns essentially exactly - there's no noise or unmodeled variance left for it to get wrong. This perfect score is a direct, mechanical consequence of the proxy label's construction (again, see the PROXY-LABEL CAVEAT section) - it should NOT be read as 'this model has solved fraud detection.' A real fraud label would not be a deterministic function of the model's own input features, and precision/recall/F1/AUC here would be expected to be well below 1.0 on genuinely unseen fraud patterns. Once real ground truth exists, re-run this evaluation - do not reuse these numbers.
+
+========================================================================================
+CLASSIFIER CALIBRATION CHECK (test split, predicted-probability deciles)
+========================================================================================
+Reliability check in the style of rpt_ml_training_cycle.txt section 6: does a predicted IS_ANOMALY probability near e.g. 0.9 actually resolve as IS_ANOMALY==1 about 90% of the time (against the proxy label), on held-out test data?
+  bin (predicted-prob range)        mean predicted   observed rate         n
+  (-0.001, 0.000296]                         0.000           0.000     13830
+  (0.000296, 0.997]                          0.184           0.183      1926
+  (0.997, 1.0]                               1.000           1.000      6744
+
+========================================================================================
+RISK TIER BUCKETING (from regressor output, fixed thresholds - not learned)
+========================================================================================
+>= 85 CRITICAL, >= 60 HIGH, >= 30 MEDIUM, else LOW (identical to scoring_math.risk_tier())
+  test predicted tier == CRITICAL                                  0
+  test predicted tier == HIGH                                      4803
+  test predicted tier == MEDIUM                                    12313
+  test predicted tier == LOW                                       5384
+
+========================================================================================
+FEATURE IMPORTANCES - REGRESSOR (top 15)
+========================================================================================
+  EXPOSURE_FACTOR                                                  0.5881
+  TOTAL_TYPOLOGY_POINTS                                            0.4045
+  ORIGINATOR_TOTAL_DECLARED_PCT                                    0.0035
+  TRANSACTION_TYPOLOGY_POINTS                                      0.0020
+  AMOUNT_USD                                                       0.0005
+  ORIGINATOR_ANNUAL_REVENUE_USD                                    0.0003
+  T02_VELOCITY_ZSCORE                                              0.0003
+  ORIGINATOR_EMPLOYEE_COUNT                                        0.0002
+  T09_SANCTIONS_MATCH_SCORE                                        0.0002
+  ORIGINATING_COUNTRY_ID_FREQ                                      0.0001
+  DESTINATION_COUNTRY_ID_FREQ                                      0.0000
+  BENEFICIARY_COUNTRY_ID_FREQ                                      0.0000
+  T09_SANCTIONS_FLAG                                               0.0000
+  ORIGINATOR_ADVERSE_MEDIA_FLAG                                    0.0000
+  ORIGINATOR_CLIENT_SEGMENT_FREQ                                   0.0000
+
+========================================================================================
+FEATURE IMPORTANCES - CLASSIFIER (top 15)
+========================================================================================
+  TOTAL_TYPOLOGY_POINTS                                            0.2654
+  EXPOSURE_FACTOR                                                  0.2475
+  TRANSACTION_TYPOLOGY_POINTS                                      0.1915
+  T09_SANCTIONS_FLAG                                               0.0480
+  T09_SANCTIONS_MATCH_SCORE                                        0.0434
+  ORIGINATOR_TOTAL_DECLARED_PCT                                    0.0353
+  ORIGINATOR_T07_OPACITY_FLAG                                      0.0319
+  ORIGINATOR_COMPANY_TYPOLOGY_POINTS                               0.0290
+  T11_HIGH_RISK_CORRIDOR_FLAG                                      0.0171
+  T10_JURISDICTION_HOP_FLAG                                        0.0168
+  T11_CORRIDOR_POINTS                                              0.0134
+  T03_PASSTHROUGH_FLAG                                             0.0116
+  ORIGINATING_COUNTRY_ID_FREQ                                      0.0081
+  DESTINATION_COUNTRY_ID_FREQ                                      0.0063
+  BENEFICIARY_COUNTRY_ID_FREQ                                      0.0058
+  NOTE: As expected (see FEATURE SET note above), TOTAL_TYPOLOGY_POINTS and its near-deterministic relatives dominate both importance rankings - this is a direct, honest consequence of the proxy label's construction, not evidence of a leak beyond what was already documented.
+
+========================================================================================
+ARTIFACTS WRITTEN
+========================================================================================
+  Regressor                                                        C:\Users\kuaga\OneDrive\Desktop\scale2026\scale2026\ml_models\sklearn_risk_regressor.joblib
+  Classifier                                                       C:\Users\kuaga\OneDrive\Desktop\scale2026\scale2026\ml_models\sklearn_anomaly_classifier.joblib
+  Feature schema                                                   C:\Users\kuaga\OneDrive\Desktop\scale2026\scale2026\ml_models\feature_schema.json
+  NOTE: A future backend integration step (NOT done in this turn) will need to: (1) join a transaction row with its originator company row exactly as load_joined() does here, (2) build the feature vector using feature_schema.json's feature_order + frequency_maps (dict lookup per categorical column, 0.0 for unseen), (3) call regressor.predict(X) for risk.overall_risk_score, classifier.predict_proba(X)[:,1] for risk.model_confidence / risk.is_anomaly, and scoring_math.risk_tier(score) for risk.risk_tier - not re-implement or re-learn tier thresholds.
+
+========================================================================================
+HEADLINE RESULT (TEST SPLIT - never touched during model selection)
+========================================================================================
+  Regressor MAE                                                    5.996
+  Regressor RMSE                                                   6.928
+  Regressor R2                                                     0.8303
+  Classifier precision                                             1.0000
+  Classifier recall                                                1.0000
+  Classifier F1                                                    1.0000
+  Classifier ROC-AUC                                               1.0000
+  Classifier confusion matrix (test)                               [[TN=15404, FP=0], [FN=0, TP=7096]]
+
+========================================================================================
+EXPLICITLY OUT OF SCOPE FOR THIS STEP
+========================================================================================
+backend/ and frontend/ were not touched. Nothing in this repo currently lets a user pick between 'RPT 1.5' and this scikit-learn model - that UI/API wiring (e.g. a SCORER=sklearn option alongside SCORER=rpt/dummy in backend/app/config.py, a new SklearnScorer(BaseScorer) implementation in backend/app/scorer.py that loads these joblib artifacts, and a frontend toggle) is a separate, later task the user will request next.

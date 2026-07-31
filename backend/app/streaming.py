@@ -106,10 +106,15 @@ async def run_stream_simulator(data_store: DataStore, manager: ConnectionManager
                 )
                 if rescore:
                     target_id = seen[tick % len(seen)]
-                    assessment = data_store.bump_rescore(target_id)
+                    # data_store.bump_rescore() can invoke a blocking
+                    # RPTScorer HTTP call under the hood - offload to a
+                    # worker thread so this doesn't stall the event loop
+                    # (and therefore every WebSocket/REST request) for the
+                    # duration of that network round-trip.
+                    assessment = await asyncio.to_thread(data_store.bump_rescore, target_id)
                     event_type = "ASSESSMENT_UPDATED"
                 else:
-                    assessment = data_store.get_assessment(transaction_id)
+                    assessment = await asyncio.to_thread(data_store.get_assessment, transaction_id)
                     event_type = "ASSESSMENT_CREATED"
                     seen.append(transaction_id)
 

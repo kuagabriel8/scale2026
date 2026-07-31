@@ -617,6 +617,25 @@ def build_transaction_features(report: FeatureReport, companies: pd.DataFrame,
     return features
 
 
+TRAIN_FRAC = 0.70
+VAL_FRAC = 0.15
+# remaining 0.15 goes to test
+
+
+def assign_time_split(tx_features):
+    """Chronological 70/15/15 split on INITIATED_AT - train on the past, validate/test on
+    later periods, so no future transaction ever leaks into an earlier split."""
+    order = tx_features["INITIATED_AT"].rank(method="first")
+    n = len(tx_features)
+    train_cut = int(n * TRAIN_FRAC)
+    val_cut = int(n * (TRAIN_FRAC + VAL_FRAC))
+
+    split = pd.Series("test", index=tx_features.index)
+    split[order <= train_cut] = "train"
+    split[(order > train_cut) & (order <= val_cut)] = "val"
+    return split
+
+
 def main():
     report = FeatureReport()
     tx_preview = load("TRANSACTIONS")
@@ -625,6 +644,8 @@ def main():
 
     companies = build_company_features(report, as_of)
     tx_features = build_transaction_features(report, companies, as_of)
+
+    tx_features["SPLIT"] = assign_time_split(tx_features)
 
     companies.to_csv(os.path.join(DATA_DIR, "COMPANY_FRAUD_FEATURES.csv"), index=False)
     companies.to_parquet(os.path.join(DATA_DIR, "COMPANY_FRAUD_FEATURES.parquet"), index=False)
@@ -637,6 +658,15 @@ def main():
     report.note(f"written to {DATA_DIR} as .csv and .parquet - this is the context/feature table "
                  "for a model predict() call (e.g. RPT target_columns like OVERALL_RISK_SCORE / "
                  "IS_ANOMALY), not a prediction itself")
+
+    report.section("TRAIN / VAL / TEST SPLIT (chronological by INITIATED_AT, 70/15/15)")
+    for name, group in tx_features.groupby("SPLIT"):
+        report.row(f"{name} rows (INITIATED_AT {group['INITIATED_AT'].min()} to "
+                   f"{group['INITIATED_AT'].max()})", len(group), len(tx_features))
+    report.note("SPLIT is a column on TRANSACTION_FRAUD_FEATURES, not separate files - filter "
+                 "SPLIT == 'train'/'val'/'test' at load time. COMPANY_FRAUD_FEATURES is a static "
+                 "per-company dimension table (no time axis of its own) and is not split - join "
+                 "it onto whichever transaction split you're using.")
 
     report.dump()
     return companies, tx_features

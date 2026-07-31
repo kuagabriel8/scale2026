@@ -8,6 +8,7 @@ import {
   MOCK_SEED_COUNT,
   WS_URL,
 } from "./config";
+import { listRiskAssessments, updateReviewStatus } from "./api";
 import { MockStream } from "./mockGenerator";
 import type {
   ConnectionStatus,
@@ -15,15 +16,21 @@ import type {
   RiskAssessmentStreamEvent,
 } from "./types";
 
+// Initial REST seed size for live mode - mirrors MOCK_SEED_COUNT's role of
+// making sure the dashboard isn't empty while the WS stream trickles in.
+const LIVE_SEED_PAGE_SIZE = 100;
+
 export interface RiskStreamState {
   assessments: RiskAssessment[];
   status: ConnectionStatus;
   dataSource: "mock" | "live";
   lastEventAt: string | null;
   eventCount: number;
-  /** Manually record a governance decision (patches local state; also
-   * forwards a REVIEW_STATUS_CHANGED-shaped intent to the live backend if
-   * connected, so the analyst action isn't silently local-only). */
+  /** Manually record a governance decision. Applies an optimistic local
+   * update immediately, then (in live mode) PATCHes
+   * /risk-assessments/{id}/review so the decision actually persists on the
+   * backend and broadcasts to other connected analysts; reverts the local
+   * update if the PATCH fails. */
   recordReviewDecision: (
     transactionId: number,
     reviewStatus: RiskAssessment["governance"]["review_status"],
@@ -104,7 +111,38 @@ export function useRiskStream(): RiskStreamState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- Live mode ----
+  // ---- Live mode: initial REST seed ----
+  useEffect(() => {
+    if (DATA_SOURCE !== "live") return;
+    let cancelled = false;
+
+    listRiskAssessments({ page_size: LIVE_SEED_PAGE_SIZE, sort: "severity" })
+      .then((res) => {
+        if (cancelled) return;
+        setById((prev) => {
+          // Don't clobber anything already ingested from the WS stream
+          // (which may connect and deliver events before this resolves).
+          const next = new Map(prev);
+          for (const assessment of res.items) {
+            if (!next.has(assessment.transaction_id)) {
+              next.set(assessment.transaction_id, assessment);
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // Backend not running / network error - leave the dashboard empty
+        // and let the WS connection-status UI reflect the failure instead
+        // of crashing here.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---- Live mode: WebSocket stream ----
   useEffect(() => {
     if (DATA_SOURCE !== "live") return;
     let cancelled = false;
@@ -158,9 +196,15 @@ export function useRiskStream(): RiskStreamState {
       reviewStatus: RiskAssessment["governance"]["review_status"],
       reviewedBy: string
     ) => {
+      // Optimistic local update so the UI feels instant, regardless of data
+      // source. In live mode this is later reconciled by the PATCH response
+      // and then the REVIEW_STATUS_CHANGED WS broadcast the backend follows
+      // it up with (both carry the same final state, so no flicker).
+      let previousGovernance: RiskAssessment["governance"] | null = null;
       setById((prev) => {
         const existing = prev.get(transactionId);
         if (!existing) return prev;
+        previousGovernance = existing.governance;
         const next = new Map(prev);
         next.set(transactionId, {
           ...existing,
@@ -173,19 +217,28 @@ export function useRiskStream(): RiskStreamState {
         return next;
       });
 
-      // Best-effort forward to a live backend if connected; the manual
-      // governance action always applies locally regardless of this.
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            action: "REVIEW_STATUS_CHANGED",
-            transaction_id: transactionId,
-            review_status: reviewStatus,
-            reviewed_by: reviewedBy || null,
-          })
-        );
-      }
+      if (DATA_SOURCE !== "live") return;
+
+      updateReviewStatus(transactionId, reviewStatus, reviewedBy || null)
+        .then((updated) => {
+          setById((prev) => {
+            if (!prev.has(transactionId)) return prev;
+            const next = new Map(prev);
+            next.set(transactionId, updated);
+            return next;
+          });
+        })
+        .catch(() => {
+          // PATCH failed (network error / 404 / etc) - revert the optimistic
+          // update so local state doesn't silently diverge from the backend.
+          setById((prev) => {
+            const existing = prev.get(transactionId);
+            if (!existing || !previousGovernance) return prev;
+            const next = new Map(prev);
+            next.set(transactionId, { ...existing, governance: previousGovernance });
+            return next;
+          });
+        });
     },
     []
   );

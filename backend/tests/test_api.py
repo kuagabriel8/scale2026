@@ -8,6 +8,10 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("MAX_ROWS", "500")
+# Force the deterministic mock scorer for the test suite so tests never
+# require live network access/credentials to the SAP-RPT deployment (the
+# app defaults to SCORER=rpt otherwise - see app/config.py).
+os.environ.setdefault("SCORER", "dummy")
 
 import pytest
 from fastapi.testclient import TestClient

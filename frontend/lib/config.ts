@@ -8,6 +8,9 @@ export const DATA_SOURCE: DataSource =
 export const WS_URL =
   process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/risk-stream";
 
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
 // Interval bounds (ms) for the mock stream generator.
 export const MOCK_MIN_INTERVAL_MS = 1600;
 export const MOCK_MAX_INTERVAL_MS = 4200;

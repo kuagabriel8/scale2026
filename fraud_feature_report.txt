@@ -55,3 +55,11 @@ OUTPUT
   COMPANY_FRAUD_FEATURES rows                                                 5,000
   TRANSACTION_FRAUD_FEATURES rows                                           150,000
   NOTE: written to C:\Users\kuaga\OneDrive\Desktop\scale2026\scale2026\cleaned_data as .csv and .parquet - this is the context/feature table for a model predict() call (e.g. RPT target_columns like OVERALL_RISK_SCORE / IS_ANOMALY), not a prediction itself
+
+========================================================================================
+TRAIN / VAL / TEST SPLIT (chronological by INITIATED_AT, 70/15/15)
+========================================================================================
+  test rows (INITIATED_AT 2026-02-14 17:11:37 to 2026-06-30 23:56:56)        22,500  (15.00% of 150,000)
+  train rows (INITIATED_AT 2024-01-01 00:09:20 to 2025-10-01 23:49:59)      105,000  (70.00% of 150,000)
+  val rows (INITIATED_AT 2025-10-01 23:55:59 to 2026-02-14 17:07:29)         22,500  (15.00% of 150,000)
+  NOTE: SPLIT is a column on TRANSACTION_FRAUD_FEATURES, not separate files - filter SPLIT == 'train'/'val'/'test' at load time. COMPANY_FRAUD_FEATURES is a static per-company dimension table (no time axis of its own) and is not split - join it onto whichever transaction split you're using.

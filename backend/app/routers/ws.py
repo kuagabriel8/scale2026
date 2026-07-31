@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -30,7 +31,14 @@ async def risk_stream(websocket: WebSocket) -> None:
             data = await websocket.receive_json()
             if isinstance(data, dict) and data.get("type") == "get":
                 tid = data.get("transaction_id")
-                assessment = data_store.get_assessment(int(tid)) if tid is not None else None
+                # Offload: get_assessment() can invoke a blocking RPTScorer
+                # HTTP call, which must not block the event loop (and thus
+                # every other WebSocket/REST client) while it runs.
+                assessment = (
+                    await asyncio.to_thread(data_store.get_assessment, int(tid))
+                    if tid is not None
+                    else None
+                )
                 if assessment is not None:
                     event = manager.build_event("ASSESSMENT_UPDATED", assessment)
                     await websocket.send_json(event)

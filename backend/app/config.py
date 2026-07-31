@@ -14,10 +14,14 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 
-# Load backend/.env if present (optional - no secrets required for the mock
-# scorer). Does not touch the repo-root .env, which belongs to the HANA/AI
-# Core scripts.
-load_dotenv(BACKEND_DIR / ".env")
+# Load the repo-root .env first (this is where AICORE_CLIENT_ID/SECRET,
+# AICORE_AUTH_URL, AICORE_RESOURCE_GROUP, and the RPT deployment URL live -
+# shared with the HANA/AI Core scripts at the repo root), then optionally
+# overlay backend/.env if present so backend-specific overrides (e.g. a
+# different SCORER or MODEL_VERSION for local dev) win without duplicating
+# secrets into a second file.
+load_dotenv(REPO_ROOT / ".env")
+load_dotenv(BACKEND_DIR / ".env", override=True)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -73,7 +77,31 @@ class Settings:
     # production deployment via env var.
     VALIDATE_RESPONSES: bool = _bool("VALIDATE_RESPONSES", True)
 
-    MODEL_VERSION: str = os.getenv("MODEL_VERSION", "dummy-mock-v0")
+    # --- ML/RPT scoring layer selection ---
+    # "rpt"   -> RPTScorer, real SAP-RPT tabular foundation model calls.
+    # "dummy" -> DummyScorer, deterministic mock (used by the test suite and
+    #            as an explicit opt-out / offline-dev fallback).
+    SCORER: str = os.getenv("SCORER", "rpt").strip().lower()
+
+    MODEL_VERSION: str = os.getenv("MODEL_VERSION") or (
+        "sap-rpt-1.5-large" if SCORER == "rpt" else "dummy-mock-v0"
+    )
+
+    # --- SAP AI Core / RPT deployment (see repo-root .env) ---
+    AICORE_CLIENT_ID: str = os.getenv("AICORE_CLIENT_ID", "")
+    AICORE_CLIENT_SECRET: str = os.getenv("AICORE_CLIENT_SECRET", "")
+    AICORE_AUTH_URL: str = os.getenv("AICORE_AUTH_URL", "")
+    AICORE_RESOURCE_GROUP: str = os.getenv("AICORE_RESOURCE_GROUP", "")
+    RPT_URL: str = os.getenv("RPT", "").strip()
+    RPT_TIMEOUT_SECONDS: float = float(os.getenv("RPT_TIMEOUT_SECONDS", "20"))
+    # Safety buffer subtracted from the OAuth token's expires_in before we
+    # consider it stale and fetch a new one, so we never send a request with
+    # a token that expires mid-flight.
+    RPT_TOKEN_REFRESH_BUFFER_SECONDS: float = float(os.getenv("RPT_TOKEN_REFRESH_BUFFER_SECONDS", "60"))
+    # Size of the stratified proxy-labeled context pool sampled once from
+    # TRANSACTION_FRAUD_FEATURES.parquet's SPLIT == "train" rows (see
+    # RPTScorer._build_context_pool in app/scorer.py).
+    RPT_CONTEXT_POOL_SIZE: int = int(os.getenv("RPT_CONTEXT_POOL_SIZE", "200"))
 
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))

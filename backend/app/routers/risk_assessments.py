@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -69,7 +70,13 @@ async def update_review_status(
     state changes - the backend never auto-transitions review_status.
     Emits a REVIEW_STATUS_CHANGED event (full assessment envelope) to all
     connected /ws/risk-stream clients so dashboards update live."""
-    assessment = data_store.update_review(transaction_id, body.review_status, body.reviewed_by)
+    # Offload: update_review() rebuilds the assessment via
+    # _build_assessment_at(), which calls scorer.score() again for the
+    # current update_count - with RPTScorer that's a blocking HTTP call and
+    # must not run inline on the event loop of this async endpoint.
+    assessment = await asyncio.to_thread(
+        data_store.update_review, transaction_id, body.review_status, body.reviewed_by
+    )
     if assessment is None:
         raise HTTPException(status_code=404, detail=f"transaction_id {transaction_id} not found")
 

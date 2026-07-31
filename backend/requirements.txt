@@ -1,4 +1,5 @@
 fastapi>=0.110,<1.0
+hdbcli
 uvicorn[standard]>=0.29
 pandas>=2.0
 pyarrow>=14.0

@@ -1,0 +1,29 @@
+.wrap {
+  display: flex;
+  gap: 4px;
+  padding: 8px 28px 0;
+  max-width: 1280px;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--grid);
+}
+
+.tab {
+  display: inline-block;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+}
+
+.tab:hover {
+  color: var(--ink-primary);
+  background: var(--surface-raised);
+}
+
+.tab[data-active="true"] {
+  color: var(--ink-primary);
+  border-bottom-color: var(--cat-placement);
+}

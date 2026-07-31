@@ -125,5 +125,25 @@ class Settings:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
 
+    # --- HANA Cloud connection (see repo-root .env / fraud_data_cleaning.py's
+    # connect()) - used only by the independent time-to-resolve prediction
+    # feature (app/time_prediction.py + app/routers/time_prediction.py). Not
+    # used by the risk-assessment API, which reads pre-cleaned parquet files
+    # under CLEANED_DATA_DIR instead. There is no team_03_credentials.json in
+    # this repo - plain HANA_* env vars are the only real credential source. ---
+    HANA_HOST: str = os.getenv("HANA_HOST", "")
+    HANA_PORT: int = int(os.getenv("HANA_PORT", "0") or 0)
+    HANA_USER: str = os.getenv("HANA_USER", "")
+    HANA_PASSWORD: str = os.getenv("HANA_PASSWORD", "")
+    HANA_SCHEMA: str = os.getenv("HANA_SCHEMA", "TEAM_03")
+
+    # --- Time-to-resolve prediction defaults (see app/time_prediction.py) ---
+    TIME_PREDICTION_CONTEXT_ROWS: int = int(os.getenv("TIME_PREDICTION_CONTEXT_ROWS", "50"))
+    TIME_PREDICTION_CANDIDATE_ROWS: int = int(os.getenv("TIME_PREDICTION_CANDIDATE_ROWS", "500"))
+    # Cap on concurrent RPT /predict calls fired for one analyst's open-case
+    # batch (an analyst can have 50+ open cases) - keeps us from blasting the
+    # AI Core endpoint with an unbounded number of simultaneous requests.
+    TIME_PREDICTION_MAX_CONCURRENCY: int = int(os.getenv("TIME_PREDICTION_MAX_CONCURRENCY", "10"))
+
 
 settings = Settings()

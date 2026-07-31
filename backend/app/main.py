@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .data_store import DataStore
-from .routers import risk_assessments, ws
+from .routers import risk_assessments, time_prediction, ws
 from .scorer import BaseScorer, DummyScorer, RPTScorer, SklearnScorer
 from .streaming import ConnectionManager, run_stream_simulator
 
@@ -110,6 +110,7 @@ app.add_middleware(
 
 app.include_router(risk_assessments.router)
 app.include_router(ws.router)
+app.include_router(time_prediction.router)
 
 
 @app.get("/health", tags=["meta"])
